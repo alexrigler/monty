@@ -30,8 +30,11 @@ fn main() -> ExitCode {
     };
     let tic = Instant::now();
 
-    let ex = Executor::new(&code, file_path, &[]).unwrap();
-    match ex.run() {
+    let input_names = vec!["foo", "bar"];
+    let inputs = vec![Object::Int(1), Object::Int(2)];
+
+    let ex = Executor::new(&code, file_path, &input_names).unwrap();
+    match ex.run(inputs) {
         Ok(_) => {
             let toc = Instant::now();
             eprintln!("Elapsed time: {:?}", toc - tic);
@@ -70,7 +73,7 @@ struct Executor {
 impl Executor {
     fn new(code: &str, filename: &str, input_names: &[&str]) -> ParseResult<Self> {
         let nodes = parse(code, filename)?;
-        // dbg!(&nodes);
+        dbg!(&nodes);
         let (initial_namespace, nodes) = prepare(nodes, input_names)?;
         Ok(Self {
             initial_namespace,
@@ -78,7 +81,11 @@ impl Executor {
         })
     }
 
-    fn run(&self) -> RunResult<()> {
-        Frame::new(self.initial_namespace.clone()).execute(&self.nodes)
+    fn run(&self, inputs: Vec<Object>) -> RunResult<()> {
+        let mut namespace = self.initial_namespace.clone();
+        for (i, input) in inputs.into_iter().enumerate() {
+            namespace[i] = input;
+        }
+        Frame::new(namespace).execute(&self.nodes)
     }
 }

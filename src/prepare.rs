@@ -12,8 +12,10 @@ pub(crate) type RunExpr = Expr<usize, Builtins>;
 /// TODO:
 /// * pre-calculate const expressions
 /// * const assignment add directly to namespace
-pub(crate) fn prepare(nodes: Vec<Node<String, String>>, _input_names: &[&str]) -> PrepareResult<(Vec<Object>, Vec<RunNode>)> {
-    let mut namespace = Namespace::new(nodes.len());
+
+
+pub(crate) fn prepare(nodes: Vec<Node<String, String>>, input_names: &[&str]) -> PrepareResult<(Vec<Object>, Vec<RunNode>)> {
+    let mut namespace = Namespace::new(nodes.len(), input_names);
     let new_nodes = prepare_nodes(nodes, &mut namespace)?;
     let initial_namespace = vec![Object::Undefined; namespace.names_count];
     Ok((initial_namespace, new_nodes))
@@ -103,11 +105,13 @@ struct Namespace {
 }
 
 impl Namespace {
-    fn new(capacity: usize) -> Self {
-        Self {
-            name_map: AHashMap::with_capacity(capacity),
-            names_count: 0,
+    fn new(capacity: usize, input_names: &[&str]) -> Self {
+        let mut name_map = AHashMap::with_capacity(capacity);
+        for (index, name) in input_names.iter().enumerate() {
+            name_map.insert(name.to_string(), index);
         }
+        let names_count = input_names.len();
+        Self { name_map, names_count }
     }
 
     fn get_id(&mut self, name: String) -> usize {
