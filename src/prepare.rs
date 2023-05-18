@@ -45,11 +45,11 @@ impl Prepare {
                 Node::Assign { target, object } => {
                     let expr = self.prepare_expression(*object)?;
                     let target = self.get_id(target);
-                    if expr.is_const() {
-                        self.namespace[target] = expr.into_const();
-                    } else {
-                        new_nodes.push(Node::Assign { target, object: Box::new(expr) });
-                    }
+                    // if expr.is_const() {
+                    //     self.namespace[target] = expr.into_const();
+                    // } else {
+                    // }
+                    new_nodes.push(Node::Assign { target, object: Box::new(expr) });
                 }
                 Node::OpAssign { target, op, object } => {
                     let target = self.get_id(target);

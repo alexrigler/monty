@@ -37,7 +37,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    pub fn evaluate(&'a self, expr: &'a RunExpr) -> RunResult<Cow<'a, Object>> {
+    pub fn evaluate(&self, expr: &'a RunExpr) -> RunResult<Cow<'a, Object>> {
         match expr {
             Expr::Constant(object) => Ok(Cow::Borrowed(object)),
             Expr::Name(id) => {
@@ -51,8 +51,8 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Expr::Call { func, args, kwargs } => self.call_builtin(func, args, kwargs),
-            Expr::Op { left, op, right } => self.evaluate_op(left, op, right),
-            Expr::CmpOp { left, op, right } => Ok(Cow::Owned(self.evaluate_cmp_op(left, op, right)?.into())),
+            Expr::Op { left, op, right } => self.op(left, op, right),
+            Expr::CmpOp { left, op, right } => Ok(Cow::Owned(self.cmp_op(left, op, right)?.into())),
             Expr::List(elements) => {
                 let objects = elements
                     .iter()
@@ -63,7 +63,17 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn evaluate_op(&self, left: &RunExpr, op: &Operator, right: &RunExpr) -> RunResult<Cow<Object>> {
+    pub fn evaluate_bool(&self, expr: &RunExpr) -> RunResult<bool> {
+        match expr {
+            Expr::CmpOp { left, op, right } => self.cmp_op(left, op, right),
+            _ => {
+                let object = self.evaluate(expr)?;
+                object.as_ref().bool().ok_or_else(|| Cow::Owned(format!("Cannot convert {} to bool", object.as_ref())))
+            }
+        }
+    }
+
+    fn op(&self, left: &'a RunExpr, op: &'a Operator, right: &'a RunExpr) -> RunResult<Cow<'a, Object>> {
         let left_object = self.evaluate(left)?;
         let right_object = self.evaluate(right)?;
         let op_object: Option<Object> = match op {
@@ -78,7 +88,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn evaluate_cmp_op(&self, left: &RunExpr, op: &CmpOperator, right: &RunExpr) -> RunResult<bool> {
+    fn cmp_op(&self, left: &RunExpr, op: &CmpOperator, right: &RunExpr) -> RunResult<bool> {
         let left_object = self.evaluate(left)?;
         let right_object = self.evaluate(right)?;
         let op_object: Option<bool> = match op {
@@ -96,7 +106,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    pub fn call_builtin(&self, builtin: &Builtins, args: &[RunExpr], _kwargs: &[(usize, RunExpr)]) -> RunResult<Cow<Object>> {
+    pub fn call_builtin(&self, builtin: &'a Builtins, args: &'a [RunExpr], _kwargs: &'a [(usize, RunExpr)]) -> RunResult<Cow<'a, Object>> {
         match builtin {
             Builtins::Print => {
                 for (i, arg) in args.iter().enumerate() {

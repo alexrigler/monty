@@ -31,8 +31,10 @@ fn main() -> ExitCode {
     };
     let tic = Instant::now();
 
-    let input_names = vec!["foo", "bar"];
-    let inputs = vec![Object::Int(1), Object::Int(2)];
+    // let input_names = vec!["foo", "bar"];
+    // let inputs = vec![Object::Int(1), Object::Int(2)];
+    let input_names = vec![];
+    let inputs = vec![];
 
     let ex = Executor::new(&code, file_path, &input_names).unwrap();
     match ex.run(inputs) {
@@ -75,7 +77,7 @@ impl Executor {
     fn new(code: &str, filename: &str, input_names: &[&str]) -> ParseResult<Self> {
         let nodes = parse(code, filename)?;
         let (initial_namespace, nodes) = prepare(nodes, input_names)?;
-        dbg!(&nodes);
+        dbg!(&initial_namespace, &nodes);
         Ok(Self {
             initial_namespace,
             nodes,
