@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use num::ToPrimitive;
 use rustpython_parser::ast::{
     Boolop, Cmpop, Constant, Expr as AstExpr, ExprKind, Keyword, Operator as AstOperator, Stmt, StmtKind, TextRange,
@@ -8,13 +6,12 @@ use rustpython_parser::parse_program;
 
 use crate::object::Object;
 use crate::types::{CmpOperator, CodePosition, CodeRange, Expr, ExprLoc, Function, Identifier, Kwarg, Node, Operator};
-
-pub type ParseResult<T> = Result<T, Cow<'static, str>>;
+use crate::parse_error::{ParseError, ParseResult};
 
 pub(crate) fn parse(code: &str, filename: &str) -> ParseResult<Vec<Node>> {
     match parse_program(code, filename) {
         Ok(ast) => Parser::new(code).parse_statements(ast),
-        Err(e) => Err(format!("Parse error: {e}").into()),
+        Err(e) => Err(ParseError::Parsing(e.to_string())),
     }
 }
 
@@ -47,7 +44,7 @@ impl Parser {
                 decorator_list: _,
                 returns: _,
                 type_comment: _,
-            } => Err("TODO FunctionDef".into()),
+            } => Err(ParseError::Todo("FunctionDef")),
             StmtKind::AsyncFunctionDef {
                 name: _,
                 args: _,
@@ -55,19 +52,19 @@ impl Parser {
                 decorator_list: _,
                 returns: _,
                 type_comment: _,
-            } => Err("TODO AsyncFunctionDef".into()),
+            } => Err(ParseError::Todo("AsyncFunctionDef")),
             StmtKind::ClassDef {
                 name: _,
                 bases: _,
                 keywords: _,
                 body: _,
                 decorator_list: _,
-            } => Err("TODO ClassDef".into()),
+            } => Err(ParseError::Todo("ClassDef")),
             StmtKind::Return { value } => match value {
                 Some(value) => Ok(Node::Return(self.parse_expression(*value)?)),
                 None => Ok(Node::ReturnNone),
             },
-            StmtKind::Delete { targets: _ } => Err("TODO Delete".into()),
+            StmtKind::Delete { targets: _ } => Err(ParseError::Todo("Delete")),
             StmtKind::Assign { targets, value, .. } => self.parse_assignment(first(targets)?, *value),
             StmtKind::AugAssign { target, op, value } => Ok(Node::OpAssign {
                 target: self.parse_identifier(*target)?,
@@ -102,12 +99,12 @@ impl Parser {
                 body: _,
                 orelse: _,
                 type_comment: _,
-            } => Err("TODO AsyncFor".into()),
+            } => Err(ParseError::Todo("AsyncFor")),
             StmtKind::While {
                 test: _,
                 body: _,
                 orelse: _,
-            } => Err("TODO While".into()),
+            } => Err(ParseError::Todo("While")),
             StmtKind::If { test, body, orelse } => {
                 let test = self.parse_expression(*test)?;
                 let body = self.parse_statements(body)?;
@@ -118,39 +115,39 @@ impl Parser {
                 items: _,
                 body: _,
                 type_comment: _,
-            } => Err("TODO With".into()),
+            } => Err(ParseError::Todo("With")),
             StmtKind::AsyncWith {
                 items: _,
                 body: _,
                 type_comment: _,
-            } => Err("TODO AsyncWith".into()),
-            StmtKind::Match { subject: _, cases: _ } => Err("TODO Match".into()),
-            StmtKind::Raise { exc: _, cause: _ } => Err("TODO Raise".into()),
+            } => Err(ParseError::Todo("AsyncWith")),
+            StmtKind::Match { subject: _, cases: _ } => Err(ParseError::Todo("Match")),
+            StmtKind::Raise { exc: _, cause: _ } => Err(ParseError::Todo("Raise")),
             StmtKind::Try {
                 body: _,
                 handlers: _,
                 orelse: _,
                 finalbody: _,
-            } => Err("TODO Try".into()),
+            } => Err(ParseError::Todo("Try")),
             StmtKind::TryStar {
                 body: _,
                 handlers: _,
                 orelse: _,
                 finalbody: _,
-            } => Err("TODO TryStar".into()),
-            StmtKind::Assert { test: _, msg: _ } => Err("TODO Assert".into()),
-            StmtKind::Import { names: _ } => Err("TODO Import".into()),
+            } => Err(ParseError::Todo("TryStar")),
+            StmtKind::Assert { test: _, msg: _ } => Err(ParseError::Todo("Assert")),
+            StmtKind::Import { names: _ } => Err(ParseError::Todo("Import")),
             StmtKind::ImportFrom {
                 module: _,
                 names: _,
                 level: _,
-            } => Err("TODO ImportFrom".into()),
-            StmtKind::Global { names: _ } => Err("TODO Global".into()),
-            StmtKind::Nonlocal { names: _ } => Err("TODO Nonlocal".into()),
+            } => Err(ParseError::Todo("ImportFrom")),
+            StmtKind::Global { names: _ } => Err(ParseError::Todo("Global")),
+            StmtKind::Nonlocal { names: _ } => Err(ParseError::Todo("Nonlocal")),
             StmtKind::Expr { value } => Ok(Node::Expr(self.parse_expression(*value)?)),
             StmtKind::Pass => Ok(Node::Pass),
-            StmtKind::Break => Err("TODO Break".into()),
-            StmtKind::Continue => Err("TODO Continue".into()),
+            StmtKind::Break => Err(ParseError::Todo("Break")),
+            StmtKind::Continue => Err(ParseError::Todo("Continue")),
         }
     }
 
@@ -167,7 +164,7 @@ impl Parser {
         match node {
             ExprKind::BoolOp { op, values } => {
                 if values.len() != 2 {
-                    return Err("BoolOp must have 2 values".into());
+                    return Err(ParseError::Todo("BoolOp must have 2 values"));
                 }
                 let mut values = values.into_iter();
                 let left = Box::new(self.parse_expression(values.next().unwrap())?);
@@ -181,7 +178,7 @@ impl Parser {
                     },
                 })
             }
-            ExprKind::NamedExpr { target: _, value: _ } => Err("TODO NamedExpr".into()),
+            ExprKind::NamedExpr { target: _, value: _ } => Err(ParseError::Todo("NamedExpr")),
             ExprKind::BinOp { left, op, right } => {
                 let left = Box::new(self.parse_expression(*left)?);
                 let right = Box::new(self.parse_expression(*right)?);
@@ -194,26 +191,26 @@ impl Parser {
                     },
                 })
             }
-            ExprKind::UnaryOp { op: _, operand: _ } => Err("TODO UnaryOp".into()),
-            ExprKind::Lambda { args: _, body: _ } => Err("TODO Lambda".into()),
+            ExprKind::UnaryOp { op: _, operand: _ } => Err(ParseError::Todo("UnaryOp")),
+            ExprKind::Lambda { args: _, body: _ } => Err(ParseError::Todo("Lambda")),
             ExprKind::IfExp {
                 test: _,
                 body: _,
                 orelse: _,
-            } => Err("TODO IfExp".into()),
-            ExprKind::Dict { keys: _, values: _ } => Err("TODO Dict".into()),
-            ExprKind::Set { elts: _ } => Err("TODO Set".into()),
-            ExprKind::ListComp { elt: _, generators: _ } => Err("TODO ListComp".into()),
-            ExprKind::SetComp { elt: _, generators: _ } => Err("TODO SetComp".into()),
+            } => Err(ParseError::Todo("IfExp")),
+            ExprKind::Dict { keys: _, values: _ } => Err(ParseError::Todo("Dict")),
+            ExprKind::Set { elts: _ } => Err(ParseError::Todo("Set")),
+            ExprKind::ListComp { elt: _, generators: _ } => Err(ParseError::Todo("ListComp")),
+            ExprKind::SetComp { elt: _, generators: _ } => Err(ParseError::Todo("SetComp")),
             ExprKind::DictComp {
                 key: _,
                 value: _,
                 generators: _,
-            } => Err("TODO DictComp".into()),
-            ExprKind::GeneratorExp { elt: _, generators: _ } => Err("TODO GeneratorExp".into()),
-            ExprKind::Await { value: _ } => Err("TODO Await".into()),
-            ExprKind::Yield { value: _ } => Err("TODO Yield".into()),
-            ExprKind::YieldFrom { value: _ } => Err("TODO YieldFrom".into()),
+            } => Err(ParseError::Todo("DictComp")),
+            ExprKind::GeneratorExp { elt: _, generators: _ } => Err(ParseError::Todo("GeneratorExp")),
+            ExprKind::Await { value: _ } => Err(ParseError::Todo("Await")),
+            ExprKind::Yield { value: _ } => Err(ParseError::Todo("Yield")),
+            ExprKind::YieldFrom { value: _ } => Err(ParseError::Todo("YieldFrom")),
             ExprKind::Compare { left, ops, comparators } => Ok(ExprLoc::new(
                 self.convert_range(&range),
                 Expr::CmpOp {
@@ -241,8 +238,8 @@ impl Parser {
                 value: _,
                 conversion: _,
                 format_spec: _,
-            } => Err("TODO FormattedValue".into()),
-            ExprKind::JoinedStr { values: _ } => Err("TODO JoinedStr".into()),
+            } => Err(ParseError::Todo("FormattedValue")),
+            ExprKind::JoinedStr { values: _ } => Err(ParseError::Todo("JoinedStr")),
             ExprKind::Constant { value, .. } => Ok(ExprLoc::new(
                 self.convert_range(&range),
                 Expr::Constant(convert_const(value)?),
@@ -251,31 +248,31 @@ impl Parser {
                 value: _,
                 attr: _,
                 ctx: _,
-            } => Err("TODO Attribute".into()),
+            } => Err(ParseError::Todo("Attribute")),
             ExprKind::Subscript {
                 value: _,
                 slice: _,
                 ctx: _,
-            } => Err("TODO Subscript".into()),
-            ExprKind::Starred { value: _, ctx: _ } => Err("TODO Starred".into()),
+            } => Err(ParseError::Todo("Subscript")),
+            ExprKind::Starred { value: _, ctx: _ } => Err(ParseError::Todo("Starred")),
             ExprKind::Name { id, .. } => Ok(ExprLoc::new(
                 self.convert_range(&range),
                 Expr::Name(Identifier::from_name(id)),
             )),
-            ExprKind::List { elts: _, ctx: _ } => Err("TODO List".into()),
-            ExprKind::Tuple { elts: _, ctx: _ } => Err("TODO Tuple".into()),
+            ExprKind::List { elts: _, ctx: _ } => Err(ParseError::Todo("List")),
+            ExprKind::Tuple { elts: _, ctx: _ } => Err(ParseError::Todo("Tuple")),
             ExprKind::Slice {
                 lower: _,
                 upper: _,
                 step: _,
-            } => Err("TODO Slice".into()),
+            } => Err(ParseError::Todo("Slice")),
         }
     }
 
     fn parse_kwargs(&self, kwarg: Keyword) -> ParseResult<Kwarg> {
         let key = match kwarg.node.arg {
             Some(key) => Identifier::from_name(key),
-            None => return Err("kwargs with no key".into()),
+            None => return Err(ParseError::Todo("kwargs with no key")),
         };
         let value = self.parse_expression(kwarg.node.value)?;
         Ok(Kwarg { key, value })
@@ -284,7 +281,7 @@ impl Parser {
     fn parse_identifier(&self, ast: AstExpr) -> ParseResult<Identifier> {
         match ast.node {
             ExprKind::Name { id, .. } => Ok(Identifier::from_name(id)),
-            _ => Err(format!("Expected name, got {:?}", ast.node).into()),
+            _ => Err(ParseError::Internal(format!("Expected name, got {:?}", ast.node).into())),
         }
     }
 
@@ -309,9 +306,9 @@ impl Parser {
 
 fn first<T: std::fmt::Debug>(v: Vec<T>) -> ParseResult<T> {
     if v.len() != 1 {
-        Err(format!("Expected 1 element, got {} (raw: {v:?})", v.len()).into())
+        Err(ParseError::Internal(format!("Expected 1 element, got {} (raw: {v:?})", v.len()).into()))
     } else {
-        v.into_iter().next().ok_or_else(|| "Expected 1 element, got 0".into())
+        v.into_iter().next().ok_or_else(|| ParseError::Internal("Expected 1 element, got 0".into()))
     }
 }
 
@@ -366,14 +363,14 @@ fn convert_const(c: Constant) -> ParseResult<Object> {
         Constant::Bytes(b) => Object::Bytes(b),
         Constant::Int(big_int) => match big_int.to_i64() {
             Some(i) => Object::Int(i),
-            None => return Err(format!("int {big_int} too big").into()),
+            None => return Err(ParseError::Todo("BigInt Support")),
         },
         Constant::Tuple(tuple) => {
             let t = tuple.into_iter().map(convert_const).collect::<ParseResult<_>>()?;
             Object::Tuple(t)
         }
         Constant::Float(f) => Object::Float(f),
-        Constant::Complex { .. } => return Err("complex constants not supported".into()),
+        Constant::Complex { .. } => return Err(ParseError::Todo("complex constants")),
         Constant::Ellipsis => Object::Ellipsis,
     };
     Ok(v)

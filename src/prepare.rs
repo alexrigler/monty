@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
@@ -6,12 +5,11 @@ use ahash::AHashMap;
 use crate::evaluate::Evaluator;
 use crate::object::Object;
 use crate::types::{Builtins, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
-
-pub(crate) type PrepareResult<T> = Result<T, Cow<'static, str>>;
+use crate::parse_error::{ParseError, ParseResult};
 
 /// TODO:
 /// * check variables exist before pre-assigning
-pub(crate) fn prepare(nodes: Vec<Node>, input_names: &[&str]) -> PrepareResult<(Vec<Object>, Vec<Node>)> {
+pub(crate) fn prepare(nodes: Vec<Node>, input_names: &[&str]) -> ParseResult<(Vec<Object>, Vec<Node>)> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
     let new_nodes = p.prepare_nodes(nodes)?;
     Ok((p.namespace, new_nodes))
@@ -41,7 +39,7 @@ impl Prepare {
         }
     }
 
-    fn prepare_nodes(&mut self, nodes: Vec<Node>) -> PrepareResult<Vec<Node>> {
+    fn prepare_nodes(&mut self, nodes: Vec<Node>) -> ParseResult<Vec<Node>> {
         let nodes_len = nodes.len();
         let mut new_nodes = Vec::with_capacity(nodes_len);
         for (index, node) in nodes.into_iter().enumerate() {
@@ -95,7 +93,7 @@ impl Prepare {
                     let body = self.prepare_nodes(body)?;
                     let or_else = self.prepare_nodes(or_else)?;
                     if test.expr.is_const() {
-                        if test.expr.into_object().bool()? {
+                        if test.expr.into_object().bool().map_err(ParseError::pre_eval)? {
                             new_nodes.extend(body);
                         } else {
                             new_nodes.extend(or_else);
@@ -109,7 +107,7 @@ impl Prepare {
         Ok(new_nodes)
     }
 
-    fn prepare_expression(&mut self, loc_expr: ExprLoc) -> PrepareResult<ExprLoc> {
+    fn prepare_expression(&mut self, loc_expr: ExprLoc) -> ParseResult<ExprLoc> {
         let ExprLoc { position, expr } = loc_expr;
         let expr = match expr {
             Expr::Constant(object) => Expr::Constant(object),
@@ -127,7 +125,7 @@ impl Prepare {
             Expr::Call { func, args, kwargs } => {
                 let ident = match func {
                     Function::Ident(ident) => ident,
-                    Function::Builtin(_) => return Err("Cal prepare expected an identifier".into()),
+                    Function::Builtin(_) => return Err(ParseError::Internal("Call prepare expected an identifier".into())),
                 };
                 let func = Function::Builtin(Builtins::find(&ident.name)?);
                 Expr::Call {
@@ -135,18 +133,18 @@ impl Prepare {
                     args: args
                         .into_iter()
                         .map(|e| self.prepare_expression(e))
-                        .collect::<PrepareResult<_>>()?,
+                        .collect::<ParseResult<_>>()?,
                     kwargs: kwargs
                         .into_iter()
                         .map(|kwarg| self.prepare_kwarg(kwarg))
-                        .collect::<PrepareResult<_>>()?,
+                        .collect::<ParseResult<_>>()?,
                 }
             }
             Expr::List(elements) => {
                 let expressions = elements
                     .into_iter()
                     .map(|e| self.prepare_expression(e))
-                    .collect::<PrepareResult<_>>()?;
+                    .collect::<ParseResult<_>>()?;
                 Expr::List(expressions)
             }
         };
@@ -157,7 +155,7 @@ impl Prepare {
                 position: position.clone(),
                 expr,
             };
-            let object = evaluate.evaluate(&tmp_expr_loc)?;
+            let object = evaluate.evaluate(&tmp_expr_loc).map_err(ParseError::pre_eval)?;
             Ok(ExprLoc {
                 position,
                 expr: Expr::Constant(object.into_owned()),
@@ -167,7 +165,7 @@ impl Prepare {
         }
     }
 
-    fn prepare_kwarg(&mut self, kwarg: Kwarg) -> PrepareResult<Kwarg> {
+    fn prepare_kwarg(&mut self, kwarg: Kwarg) -> ParseResult<Kwarg> {
         let Kwarg { key, value } = kwarg;
         let value = self.prepare_expression(value)?;
         // WARNING: we're not setting the id on key here, this needs doing when we implement kwargs

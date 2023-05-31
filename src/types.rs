@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::object::Object;
-use crate::prepare::PrepareResult;
+use crate::parse_error::{ParseResult, ParseError};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Operator {
@@ -297,12 +297,12 @@ impl fmt::Display for Builtins {
 }
 
 impl Builtins {
-    pub fn find(name: &str) -> PrepareResult<Self> {
+    pub fn find(name: &str) -> ParseResult<Self> {
         match name {
             "print" => Ok(Self::Print),
             "range" => Ok(Self::Range),
             "len" => Ok(Self::Len),
-            _ => Err(format!("unknown builtin: {name}").into()),
+            _ => Err(ParseError::Internal(format!("unknown builtin: {name}").into())),
         }
     }
 

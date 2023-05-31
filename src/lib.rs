@@ -1,3 +1,4 @@
+mod parse_error;
 mod evaluate;
 mod object;
 mod parse;
@@ -6,12 +7,14 @@ mod run;
 mod types;
 
 pub use crate::object::Object;
-use crate::parse::{parse, ParseResult};
+use crate::parse::parse;
+pub use crate::parse_error::{ParseError, ParseResult};
 use crate::prepare::prepare;
 use crate::run::{Frame, RunResult};
 pub use crate::types::Exit;
 use crate::types::Node;
 
+#[derive(Debug)]
 pub struct Executor {
     initial_namespace: Vec<Object>,
     nodes: Vec<Node>,
