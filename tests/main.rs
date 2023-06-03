@@ -1,4 +1,4 @@
-use monty::{Executor, Exit, ParseError};
+use monty::{Executor, Exit};
 
 macro_rules! execute_ok_tests {
     ($($name:ident: $code:literal, $expected:expr;)*) => {
@@ -32,14 +32,14 @@ len(v)
 }
 
 macro_rules! parse_error_tests {
-    ($($name:ident: $code:literal, $expected:expr;)*) => {
+    ($($name:ident: $code:literal, $expected:literal;)*) => {
         $(
             paste::item! {
                 #[test]
                 fn [< expect_ $name _ok >]() {
                     match Executor::new($code, "test.py", &[]) {
                         Ok(v) => panic!("parse unexpected passed, output: {v:?}"),
-                        Err(e) => assert_eq!(e, $expected),
+                        Err(e) => assert_eq!(e.summary(), $expected),
                     }
                 }
             }
@@ -48,6 +48,6 @@ macro_rules! parse_error_tests {
 }
 
 parse_error_tests! {
-    add_int_str: "1 + '1'", ParseError::PreEval(r#"(1:0 - 1:7) Cannot apply operator 1 + "1""#.to_string());
-    complex: "1+2j", ParseError::Todo("complex constants");
+    add_int_str: "1 + '1'", "Exc: (1-1 to 1-8) TypeError: unsupported operand type(s) for +: 'int' and 'str'";
+    complex: "1+2j", "TODO: complex constants";
 }

@@ -66,7 +66,7 @@ impl<'c> RunFrame<'c> {
             Err(mut e) => {
                 self.set_name(&mut e);
                 Err(e)
-            },
+            }
         }
     }
 
@@ -76,7 +76,7 @@ impl<'c> RunFrame<'c> {
             Err(mut e) => {
                 self.set_name(&mut e);
                 Err(e)
-            },
+            }
         }
     }
 
@@ -106,7 +106,13 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    fn for_loop(&mut self, target: &Identifier, iter: &ExprLoc<'c>, body: &[Node<'c>], _or_else: &[Node<'c>]) -> RunResult<'c, ()> {
+    fn for_loop(
+        &mut self,
+        target: &Identifier,
+        iter: &ExprLoc<'c>,
+        body: &[Node<'c>],
+        _or_else: &[Node<'c>],
+    ) -> RunResult<'c, ()> {
         let range_size = match self.execute_expr(iter)?.as_ref() {
             Object::Range(s) => *s,
             _ => return exc_err!(InternalRunError::TodoError; "`for` iter must be a range"),

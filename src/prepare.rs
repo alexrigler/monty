@@ -94,7 +94,7 @@ impl Prepare {
                     let body = self.prepare_nodes(body)?;
                     let or_else = self.prepare_nodes(or_else)?;
                     if test.expr.is_const() {
-                        if test.expr.into_object().bool().map_err(ParseError::pre_eval)? {
+                        if test.expr.into_object().bool()? {
                             new_nodes.extend(body);
                         } else {
                             new_nodes.extend(or_else);
@@ -158,7 +158,7 @@ impl Prepare {
                 position: position.clone(),
                 expr,
             };
-            let object = evaluate.evaluate(&tmp_expr_loc).map_err(ParseError::pre_eval)?;
+            let object = evaluate.evaluate(&tmp_expr_loc)?;
             Ok(ExprLoc {
                 position,
                 expr: Expr::Constant(object.into_owned()),

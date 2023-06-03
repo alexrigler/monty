@@ -52,7 +52,12 @@ impl<'d> Evaluator<'d> {
         }
     }
 
-    fn op<'c>(&self, left: &'d ExprLoc<'c>, op: &'d Operator, right: &'d ExprLoc<'c>) -> RunResult<'c, Cow<'d, Object>> {
+    fn op<'c>(
+        &self,
+        left: &'d ExprLoc<'c>,
+        op: &'d Operator,
+        right: &'d ExprLoc<'c>,
+    ) -> RunResult<'c, Cow<'d, Object>> {
         let left_object = self.evaluate(left)?;
         let right_object = self.evaluate(right)?;
         let op_object: Option<Object> = match op {
@@ -103,7 +108,7 @@ impl<'d> Evaluator<'d> {
         )
     }
 
-    pub fn call_function<'c>(
+    fn call_function<'c>(
         &self,
         function: &'d Function,
         args: &'d [ExprLoc<'c>],

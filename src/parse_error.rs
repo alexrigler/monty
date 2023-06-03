@@ -23,9 +23,8 @@ impl<'c> fmt::Display for ParseError<'c> {
     }
 }
 
-// TODO change to From
-impl<'c> ParseError<'c> {
-    pub(crate) fn pre_eval(run_error: RunError<'c>) -> Self {
+impl<'c> From<RunError<'c>> for ParseError<'c> {
+    fn from(run_error: RunError<'c>) -> Self {
         match run_error {
             RunError::Exc(e) => Self::PreEvalExc(e),
             RunError::Internal(e) => Self::PreEvalInternal(e),
@@ -33,10 +32,22 @@ impl<'c> ParseError<'c> {
     }
 }
 
-pub type ParseResult<'c, T> = Result<T, ParseError<'c>>;
-
 impl<'c> From<InternalRunError> for ParseError<'c> {
     fn from(internal_run_error: InternalRunError) -> Self {
         Self::PreEvalInternal(internal_run_error)
     }
 }
+
+impl<'c> ParseError<'c> {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Todo(s) => format!("TODO: {s}"),
+            Self::Internal(s) => format!("Internal: {s}"),
+            Self::Parsing(s) => format!("AST: {s}"),
+            Self::PreEvalExc(s) => format!("Exc: {}", s.summary()),
+            Self::PreEvalInternal(s) => format!("Eval Internal: {s}"),
+        }
+    }
+}
+
+pub type ParseResult<'c, T> = Result<T, ParseError<'c>>;

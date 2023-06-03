@@ -291,23 +291,35 @@ impl<'c> Parser<'c> {
 
     fn convert_range(&self, range: &TextRange) -> CodeRange<'c> {
         let start = range.start().into();
+        let (start_line_no, start_line_start, start_line_end) = self.index_to_position(start);
+        let start = CodeLoc::new(start_line_no, start - start_line_start + 1);
+
         let end = range.end().into();
-        let (start, preview_line) = self.index_to_position(start);
-        let (end, _) = self.index_to_position(end);
+        let (end_line_no, end_line_start, _) = self.index_to_position(end);
+        let end = CodeLoc::new(end_line_no, end - end_line_start + 1);
+
+        let preview_line = if start_line_no == end_line_no {
+            if let Some(start_line_end) = start_line_end {
+                Some(&self.code[start_line_start..start_line_end])
+            } else {
+                Some(&self.code[start_line_start..])
+            }
+        } else {
+            None
+        };
+
         CodeRange::new(self.filename, start, end, preview_line)
     }
 
-    fn index_to_position(&self, index: usize) -> (CodeLoc, &'c str) {
-        let mut last = 0;
+    fn index_to_position(&self, index: usize) -> (usize, usize, Option<usize>) {
+        let mut line_start = 0;
         for (line_no, line_end) in self.line_ends.iter().enumerate() {
             if index <= *line_end {
-                let line = &self.code[last + 1..*line_end];
-                return (CodeLoc::new(line_no + 1, index - last), line);
+                return (line_no, line_start, Some(*line_end))
             }
-            last = *line_end;
+            line_start = *line_end + 1;
         }
-        let line = &self.code[last + 1..];
-        (CodeLoc::new(self.line_ends.len() + 1, index - last), line)
+        (self.line_ends.len() + 1, line_start, None)
     }
 }
 
@@ -397,19 +409,15 @@ pub(crate) struct CodeRange<'c> {
 
 impl<'c> fmt::Display for CodeRange<'c> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?} to {:?}", self.start, self.end)
+        write!(f, "{} to {}", self.start, self.end)
     }
 }
 
 impl<'c> CodeRange<'c> {
-    fn new(filename: &'c str, start: CodeLoc, end: CodeLoc, preview_line: &'c str) -> Self {
+    fn new(filename: &'c str, start: CodeLoc, end: CodeLoc, preview_line: Option<&'c str>) -> Self {
         Self {
             filename,
-            preview_line: if start.line == end.line {
-                Some(preview_line)
-            } else {
-                None
-            },
+            preview_line,
             start,
             end,
         }
@@ -457,6 +465,12 @@ impl<'c> CodeRange<'c> {
 struct CodeLoc {
     line: u32,
     column: u32,
+}
+
+impl fmt::Display for CodeLoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.line, self.column)
+    }
 }
 
 impl CodeLoc {

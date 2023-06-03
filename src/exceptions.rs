@@ -92,9 +92,20 @@ impl<'c> From<Exception> for ExceptionRaise<'c> {
     }
 }
 
+impl<'c> ExceptionRaise<'c> {
+    pub(crate) fn summary(&self) -> String {
+        let exc = self.exc.str_with_type();
+        if let Some(ref frame) = self.frame {
+            format!("({}) {exc}", frame.position)
+        } else {
+            format!("(<no-tb>) {exc}")
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StackFrame<'c> {
-    pub(crate) position: CodeRange<'c>,  // TODO should be a reference
+    pub(crate) position: CodeRange<'c>,
     pub(crate) frame_name: Option<&'c str>,
     pub(crate) parent: Option<Box<StackFrame<'c>>>,
 }
