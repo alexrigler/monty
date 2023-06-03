@@ -29,11 +29,12 @@ fn main() -> ExitCode {
     };
 
     let tic = Instant::now();
-    match ex.run(inputs) {
+    let r = ex.run(inputs);
+    let toc = Instant::now();
+    eprintln!("Elapsed time: {:?}\n", toc - tic);
+    match r {
         Ok(exit) => {
-            let toc = Instant::now();
-            eprintln!("Elapsed time: {:?}", toc - tic);
-            println!("Exit: {:?}", exit);
+            println!("Exit:\n{}", exit);
             ExitCode::SUCCESS
         }
         Err(err) => {

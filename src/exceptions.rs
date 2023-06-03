@@ -21,13 +21,13 @@ impl fmt::Display for Exception {
 }
 
 impl Exception {
-    // pub(crate) fn str_with_type(&self) -> String {
-    //     match self {
-    //         Self::ValueError(s) => format!("ValueError: {s}"),
-    //         Self::TypeError(s) => format!("TypeError: {s}"),
-    //         Self::NameError(s) => format!("NameError: {s}"),
-    //     }
-    // }
+    pub(crate) fn str_with_type(&self) -> String {
+        match self {
+            Self::ValueError(s) => format!("ValueError: {s}"),
+            Self::TypeError(s) => format!("TypeError: {s}"),
+            Self::NameError(s) => format!("NameError: {s}"),
+        }
+    }
 
     pub(crate) fn with_frame(self, frame: StackFrame) -> ExceptionRaise {
         ExceptionRaise {
@@ -65,10 +65,48 @@ macro_rules! exc_err {
 pub(crate) use exc_err;
 
 #[derive(Debug, Clone)]
+pub struct ExceptionRaise {
+    pub(crate) exc: Exception,
+    // first in vec is closes "bottom" frame
+    pub(crate) frame: Option<StackFrame>,
+}
+
+impl fmt::Display for ExceptionRaise {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ref frame) = self.frame {
+            writeln!(f, "Traceback (most recent call last):")?;
+            write!(f, "{}", frame)?;
+        }
+        write!(f, "{}", self.exc.str_with_type())
+    }
+}
+
+impl From<Exception> for ExceptionRaise {
+    fn from(exc: Exception) -> Self {
+        ExceptionRaise { exc, frame: None }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StackFrame {
-    position: CodeRange,
-    frame_name: Option<Cow<'static, str>>,
-    parent: Option<Box<StackFrame>>,
+    pub(crate) position: CodeRange,
+    pub(crate) frame_name: Option<Cow<'static, str>>,
+    pub(crate) parent: Option<Box<StackFrame>>,
+}
+
+impl fmt::Display for StackFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ref parent) = self.parent {
+            write!(f, "{}", parent)?;
+        }
+
+        if let Some(ref frame_name) = self.frame_name {
+            writeln!(f, "  {}, in {}", self.position.line(), frame_name)?;
+        } else {
+            writeln!(f, "  {}, in <unknown frame>", self.position.line())?;
+        }
+        writeln!(f, "    TODO - line preview")
+    }
 }
 
 impl StackFrame {
@@ -89,30 +127,6 @@ impl StackFrame {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ExceptionRaise {
-    exc: Exception,
-    // first in vec is closes "bottom" frame
-    frame: Option<StackFrame>,
-}
-
-impl fmt::Display for ExceptionRaise {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.exc)
-    }
-}
-
-// impl ExceptionRaise {
-//     pub(crate) fn undefined() -> Self {
-//         Exception::InternalUndefined.into()
-//     }
-// }
-
-impl From<Exception> for ExceptionRaise {
-    fn from(exc: Exception) -> Self {
-        ExceptionRaise { exc, frame: None }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum InternalRunError {

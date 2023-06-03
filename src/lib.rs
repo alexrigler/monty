@@ -7,11 +7,12 @@ mod prepare;
 mod run;
 mod types;
 
+use crate::exceptions::{InternalRunError, RunError};
 pub use crate::object::Object;
 use crate::parse::parse;
 pub use crate::parse_error::{ParseError, ParseResult};
 use crate::prepare::prepare;
-use crate::run::{RunFrame, RunResult};
+use crate::run::RunFrame;
 pub use crate::types::Exit;
 use crate::types::Node;
 
@@ -33,12 +34,18 @@ impl Executor {
         })
     }
 
-    pub fn run(&self, inputs: Vec<Object>) -> RunResult<Exit> {
+    pub fn run(&self, inputs: Vec<Object>) -> Result<Exit, InternalRunError> {
         let mut namespace = self.initial_namespace.clone();
         for (i, input) in inputs.into_iter().enumerate() {
             namespace[i] = input;
         }
-        RunFrame::new(namespace).execute(&self.nodes)
+        match RunFrame::new(namespace).execute(&self.nodes) {
+            Ok(v) => Ok(v),
+            Err(e) => match e {
+                RunError::Exc(exc) => Ok(Exit::Raise(exc)),
+                RunError::Internal(internal) => Err(internal)
+            }
+        }
     }
 }
 

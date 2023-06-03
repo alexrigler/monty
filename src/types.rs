@@ -1,4 +1,4 @@
-use crate::exceptions::exc_err;
+use crate::exceptions::{exc_err, ExceptionRaise};
 use std::fmt;
 
 use crate::object::Object;
@@ -103,6 +103,7 @@ impl CodePosition {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CodeRange {
+    filename: String,
     start: CodePosition,
     end: CodePosition,
 }
@@ -114,12 +115,16 @@ impl fmt::Display for CodeRange {
 }
 
 impl CodeRange {
-    pub fn new(start: CodePosition, end: CodePosition) -> Self {
-        Self { start, end }
+    pub fn new(filename: &str, start: CodePosition, end: CodePosition) -> Self {
+        Self { filename: filename.to_string(), start, end }
     }
 
     pub fn extend(&self, end: &CodeRange) -> Self {
-        Self::new(self.start, end.end)
+        Self::new(&self.filename, self.start, end.end)
+    }
+
+    pub fn line(&self) -> String {
+        format!(r#"File "{}", line {}"#, self.filename, self.start.line)
     }
 }
 
@@ -326,5 +331,15 @@ pub enum Exit {
     ReturnNone,
     Return(Object),
     // Yield(Object),
-    // Raise(Object),
+    Raise(ExceptionRaise),
+}
+
+impl fmt::Display for Exit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReturnNone => write!(f, "None"),
+            Self::Return(v) => write!(f, "{}", v),
+            Self::Raise(exc) => write!(f, "{}", exc),
+        }
+    }
 }

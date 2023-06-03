@@ -10,17 +10,18 @@ use crate::types::{CmpOperator, CodePosition, CodeRange, Expr, ExprLoc, Function
 
 pub(crate) fn parse(code: &str, filename: &str) -> ParseResult<Vec<Node>> {
     match parse_program(code, filename) {
-        Ok(ast) => Parser::new(code).parse_statements(ast),
+        Ok(ast) => Parser::new(code, filename).parse_statements(ast),
         Err(e) => Err(ParseError::Parsing(e.to_string())),
     }
 }
 
-pub struct Parser {
+pub struct Parser<'a> {
     line_ends: Vec<usize>,
+    filename: &'a str
 }
 
-impl Parser {
-    fn new(code: &str) -> Self {
+impl<'a> Parser<'a> {
+    fn new(code: &str, filename: &'a str) -> Self {
         // position of each line in the source code, to convert indexes to line number and column number
         let mut line_ends = vec![];
         for (i, c) in code.chars().enumerate() {
@@ -28,7 +29,7 @@ impl Parser {
                 line_ends.push(i);
             }
         }
-        Self { line_ends }
+        Self { filename, line_ends }
     }
 
     fn parse_statements(&self, statements: Vec<Stmt>) -> ParseResult<Vec<Node>> {
@@ -283,6 +284,7 @@ impl Parser {
 
     fn convert_range(&self, range: &TextRange) -> CodeRange {
         CodeRange::new(
+            self.filename,
             self.index_to_position(range.start().into()),
             self.index_to_position(range.end().into()),
         )

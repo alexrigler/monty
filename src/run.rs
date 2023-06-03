@@ -19,7 +19,7 @@ impl RunFrame {
         Self {
             namespace,
             parent: None,
-            name: "global".into(),
+            name: "<module>".into(),
         }
     }
 
@@ -60,11 +60,11 @@ impl RunFrame {
 
     fn execute_expr<'a>(&'a self, expr: &'a ExprLoc) -> RunResult<Cow<Object>> {
         // TODO: does creating this struct harm performance, or is it optimised out?
-        Evaluator::new(&self.namespace).evaluate(expr)
+        Evaluator::new(&self.namespace).evaluate(expr).map_err(|e| self.set_name(e))
     }
 
     fn execute_expr_bool(&self, expr: &ExprLoc) -> RunResult<bool> {
-        Evaluator::new(&self.namespace).evaluate_bool(expr)
+        Evaluator::new(&self.namespace).evaluate_bool(expr).map_err(|e| self.set_name(e))
     }
 
     fn assign(&mut self, target: &Identifier, object: &ExprLoc) -> RunResult<()> {
@@ -96,7 +96,7 @@ impl RunFrame {
     fn for_loop(&mut self, target: &Identifier, iter: &ExprLoc, body: &[Node], _or_else: &[Node]) -> RunResult<()> {
         let range_size = match self.execute_expr(iter)?.as_ref() {
             Object::Range(s) => *s,
-            _ => return exc_err!(InternalRunError::TodoError; "For iter must be a range"),
+            _ => return exc_err!(InternalRunError::TodoError; "`for` iter must be a range"),
         };
 
         for object in 0i64..range_size {
@@ -117,5 +117,14 @@ impl RunFrame {
 
     fn stack_frame(&self, position: &CodeRange) -> StackFrame {
         StackFrame::new(position, &self.name, &self.parent)
+    }
+
+    fn set_name(&self, mut error: RunError) -> RunError {
+        if let RunError::Exc(ref mut exc) = error {
+            if let Some(ref mut stack_frame) = exc.frame {
+                stack_frame.frame_name = Some(self.name.clone());
+            }
+        }
+        error
     }
 }
