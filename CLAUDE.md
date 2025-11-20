@@ -13,7 +13,23 @@ Project goals:
 - **Simplicity**: Clean, understandable implementation focused on a Python subset
 - **Snapshotting and iteration**: Plan is to allow code to be iteratively executed and snapshotted at each function call
 
-## Build and Test Commands
+## Build Commands
+
+```bash
+# format code and run clippy
+make lint
+
+# Build the project
+cargo build
+```
+
+## Tests
+
+Do **NOT** write tests within modules unless explicitly prompted to do so.
+
+Tests should live in the `tests/` directory.
+
+Commands:
 
 ```bash
 # Build the project

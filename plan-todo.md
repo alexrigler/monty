@@ -2,7 +2,7 @@
 
 - [x] Phase 0: Land literal/l-value split and conversions.
 - [x] Phase 0.5: Strip parse-time optimizations that require runtime objects; re-enable once heap semantics stabilize.
-- [ ] Phase 1: Introduce heap arena + reference counting fundamentals.
+- [x] Phase 1: Introduce heap arena + reference counting fundamentals.
 - [ ] Phase 2: Thread heap through evaluator and execution engine.
 - [ ] Phase 3: Implement assignment/refcount semantics across namespaces.
 - [ ] Phase 4: Support `is`/`is not` via object identity.

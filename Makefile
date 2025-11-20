@@ -1,16 +1,17 @@
 .DEFAULT_GOAL := all
 
-.PHONY: build-dev
-build-dev:
-	cargo build
+.PHONY: .cargo
+.cargo: ## Check that cargo is installed
+	@cargo --version || echo 'Please install cargo: https://github.com/rust-lang/cargo'
 
-.PHONY: build-prod
-build-prod:
-	cargo build --release
+.PHONY: .pre-commit
+.pre-commit: ## Check that pre-commit is installed
+	@pre-commit -V || echo 'Please install pre-commit: https://pre-commit.com/'
 
-.PHONY: format
-format:
-	cargo fmt
+.PHONY: install
+install: .cargo .pre-commit ## Install the package, dependencies, and pre-commit for local development
+	cargo check
+	pre-commit install --install-hooks
 
 .PHONY: lint
 lint:
