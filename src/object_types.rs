@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::exceptions::{exc_err, internal_err, ExcType, Exception, InternalRunError};
+use crate::heap::Heap;
 use crate::parse_error::{ParseError, ParseResult};
 use crate::run::RunResult;
 use crate::Object;
@@ -46,7 +47,7 @@ impl Types {
         }
     }
 
-    pub fn call_function<'c, 'd>(&self, args: Vec<Cow<'d, Object>>) -> RunResult<'c, Cow<'d, Object>> {
+    pub fn call_function<'c, 'd>(&self, heap: &Heap, args: Vec<Cow<'d, Object>>) -> RunResult<'c, Cow<'d, Object>> {
         match self {
             Self::BuiltinFunction(FunctionTypes::Print) => {
                 for (i, object) in args.iter().enumerate() {
@@ -64,7 +65,7 @@ impl Types {
                     return exc_err!(ExcType::TypeError; "len() takes exactly exactly one argument ({} given)", args.len());
                 }
                 let object = &args[0];
-                match object.len() {
+                match object.len(heap) {
                     Some(len) => Ok(Cow::Owned(Object::Int(len as i64))),
                     None => exc_err!(ExcType::TypeError; "Object of type {} has no len()", object),
                 }

@@ -110,7 +110,7 @@ impl<'c> RunFrame<'c> {
         let right_object = self.execute_expr(heap, expr)?.into_owned();
         if let Some(target_object) = self.namespace.get_mut(target.id) {
             let r = match op {
-                Operator::Add => target_object.add_mut(right_object),
+                Operator::Add => target_object.add_mut(right_object, heap),
                 _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
             };
             if let Err(right) = r {

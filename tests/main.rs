@@ -1,4 +1,26 @@
-use monty::{Executor, Exit};
+use monty::{Executor, Exit, Object};
+
+/// Formats an Object for debug output, following heap references to show actual values
+fn format_object_debug(obj: &Object, heap: &monty::Heap) -> String {
+    use monty::HeapData;
+
+    match obj {
+        Object::Ref(id) => match heap.get(*id) {
+            HeapData::Str(s) => format!("Str({s:?})"),
+            HeapData::Bytes(b) => format!("Bytes({b:?})"),
+            HeapData::List(items) => {
+                let formatted_items: Vec<String> = items.iter().map(|item| format_object_debug(item, heap)).collect();
+                format!("List([{}])", formatted_items.join(", "))
+            }
+            HeapData::Tuple(items) => {
+                let formatted_items: Vec<String> = items.iter().map(|item| format_object_debug(item, heap)).collect();
+                format!("Tuple(({}),)", formatted_items.join(", "))
+            }
+            HeapData::Exception(exc) => format!("Exception({exc:?})"),
+        },
+        other => format!("{other:?}"),
+    }
+}
 
 macro_rules! parse_error_tests {
     ($($name:ident: $code:literal, $expected:literal;)*) => {
@@ -27,8 +49,12 @@ macro_rules! execute_ok_tests {
                 #[test]
                 fn [< execute_ok_ $name >]() {
                     let ex = Executor::new($code, "test.py", &[]).unwrap();
-                    let output = match ex.run(vec![]) {
-                        Ok(Exit::Return(value)) => format!("{:?}", value),
+                    let result = ex.run(vec![]);
+                    let output = match result {
+                        Ok(Exit::Return(value)) => {
+                            let heap = ex.heap();
+                            format_object_debug(&value, &heap)
+                        }
                         otherwise => panic!("Unexpected exit: {:?}", otherwise),
                     };
                     let expected = $expected.trim_matches('\n');
@@ -74,8 +100,12 @@ macro_rules! execute_raise_tests {
                 #[test]
                 fn [< execute_raise_ $name >]() {
                     let ex = Executor::new($code, "test.py", &[]).unwrap();
-                    let output = match ex.run(vec![]) {
-                        Ok(Exit::Raise(exc_raise)) => format!("{}", exc_raise.exc.repr()),
+                    let result = ex.run(vec![]);
+                    let output = match result {
+                        Ok(Exit::Raise(exc_raise)) => {
+                            let heap = ex.heap();
+                            format!("{}", exc_raise.exc.repr(&heap))
+                        }
                         otherwise => panic!("Unexpected raise: {:?}", otherwise),
                     };
                     let expected = $expected_exc.trim_matches('\n');

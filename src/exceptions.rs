@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::expressions::ExprLoc;
+use crate::heap::Heap;
 use crate::object::Object;
 use crate::parse::CodeRange;
 use crate::run::RunResult;
@@ -42,14 +43,16 @@ pub struct Exception {
 
 impl fmt::Display for Exception {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Note: Display trait doesn't have heap access, so Ref objects show as <Ref(id)>
+        // For proper formatting, use repr(heap) method instead
         // different output for no args, 1 arg, and more than 1 args
         let mut args_iter = self.args.iter();
         if let Some(first_arg) = args_iter.next() {
             if let Some(second_arg) = args_iter.next() {
                 // more than one arg, print as tuple
-                write!(f, "({}, {}", first_arg.repr(), second_arg.repr())?;
+                write!(f, "({first_arg}, {second_arg}")?;
                 for arg in args_iter {
-                    write!(f, ", {}", arg.repr())?;
+                    write!(f, ", {arg}")?;
                 }
                 write!(f, ")")
             } else {
@@ -83,17 +86,17 @@ impl Exception {
         self.exc_type.str()
     }
 
-    pub fn repr(&self) -> String {
-        // TODO would this be noticeably faster if it operated on an iterable?
+    /// Returns a repr string for this exception with heap access for formatting arguments.
+    pub fn repr(&self, heap: &Heap) -> String {
         let mut s = self.exc_type.to_string();
         s.push('(');
 
         let mut args_iter = self.args.iter();
         if let Some(first) = args_iter.next() {
-            s.push_str(&first.repr());
+            s.push_str(&first.repr(heap));
             for arg in args_iter {
                 s.push_str(", ");
-                s.push_str(&arg.repr());
+                s.push_str(&arg.repr(heap));
             }
         }
         s.push(')');
@@ -120,9 +123,10 @@ impl Exception {
         right: &'d ExprLoc<'c>,
         left_object: Cow<'d, Object>,
         right_object: Cow<'d, Object>,
+        heap: &crate::heap::Heap,
     ) -> RunResult<'c, T> {
-        let left_type = left_object.type_str();
-        let right_type = right_object.type_str();
+        let left_type = left_object.type_str_with_heap(heap);
+        let right_type = right_object.type_str_with_heap(heap);
         let new_position = left.position.extend(&right.position);
         Err(
             exc!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")

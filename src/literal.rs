@@ -1,3 +1,4 @@
+use crate::heap::{Heap, HeapData};
 use crate::object::Object;
 
 /// Represents values that can be produced purely from the parser/prepare pipeline.
@@ -25,7 +26,10 @@ impl Literal {
     /// This is the only place parse-time data crosses the boundary into runtime
     /// semantics, ensuring every literal follows the same conversion path (helpful
     /// for keeping later heap/refcount logic centralized).
-    pub fn into_object(self) -> Object {
+    ///
+    /// Heap-allocated types (Str, Bytes, Tuple) will be allocated on the heap and
+    /// returned as `Object::Ref` variants. Immediate values are returned inline.
+    pub fn into_object(self, heap: &mut Heap) -> Object {
         match self {
             Self::Undefined => Object::Undefined,
             Self::Ellipsis => Object::Ellipsis,
@@ -34,11 +38,20 @@ impl Literal {
             Self::Bool(false) => Object::False,
             Self::Int(v) => Object::Int(v),
             Self::Float(v) => Object::Float(v),
-            Self::Str(s) => Object::Str(s),
-            Self::Bytes(b) => Object::Bytes(b),
+            Self::Str(s) => {
+                let id = heap.allocate(HeapData::Str(s));
+                Object::Ref(id)
+            }
+            Self::Bytes(b) => {
+                let id = heap.allocate(HeapData::Bytes(b));
+                Object::Ref(id)
+            }
             Self::Tuple(items) => {
-                let converted = items.into_iter().map(Literal::into_object).collect();
-                Object::Tuple(converted)
+                // Convert all tuple items to runtime objects
+                let converted: Vec<Object> = items.into_iter().map(|lit| lit.into_object(heap)).collect();
+                // Allocate tuple on heap
+                let id = heap.allocate(HeapData::Tuple(converted));
+                Object::Ref(id)
             }
         }
     }
@@ -47,8 +60,10 @@ impl Literal {
     ///
     /// Useful when the parser/prepare code needs to inspect a literal multiple
     /// times but still hand an owned `Object` to downstream consumers.
-    pub fn to_object(&self) -> Object {
-        self.clone().into_object()
+    ///
+    /// Heap-allocated types will be allocated on the heap with refcount=1.
+    pub fn to_object(&self, heap: &mut Heap) -> Object {
+        self.clone().into_object(heap)
     }
 
     /// Returns a Python-esque string representation for logging/debugging.

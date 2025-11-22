@@ -19,7 +19,7 @@ pub(crate) fn evaluate<'c, 'd>(
     expr_loc: &'d ExprLoc<'c>,
 ) -> RunResult<'c, Cow<'d, Object>> {
     match &expr_loc.expr {
-        Expr::Constant(literal) => Ok(Cow::Owned(literal.to_object())),
+        Expr::Constant(literal) => Ok(Cow::Owned(literal.to_object(heap))),
         Expr::Name(ident) => {
             if let Some(object) = namespace.get(ident.id) {
                 match object {
@@ -60,9 +60,11 @@ pub(crate) fn evaluate_bool<'c, 'd>(
     heap: &'d mut Heap,
     expr_loc: &'d ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
-    match &expr_loc.expr {
-        Expr::CmpOp { left, op, right } => cmp_op(namespace, heap, left, op, right),
-        _ => Ok(evaluate(namespace, heap, expr_loc)?.as_ref().bool()),
+    if let Expr::CmpOp { left, op, right } = &expr_loc.expr {
+        cmp_op(namespace, heap, left, op, right)
+    } else {
+        let obj = evaluate(namespace, heap, expr_loc)?.into_owned();
+        Ok(obj.bool(heap))
     }
 }
 
@@ -75,16 +77,16 @@ fn eval_op<'c, 'd>(
     right: &'d ExprLoc<'c>,
 ) -> RunResult<'c, Cow<'d, Object>> {
     let left_object = evaluate(namespace, heap, left)?.into_owned();
-    let right_object = evaluate(namespace, heap, right)?;
+    let right_object = evaluate(namespace, heap, right)?.into_owned();
     let op_object: Option<Object> = match op {
-        Operator::Add => left_object.add(&right_object),
+        Operator::Add => left_object.add(&right_object, heap),
         Operator::Sub => left_object.sub(&right_object),
         Operator::Mod => left_object.modulus(&right_object),
         _ => return internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
     };
     match op_object {
         Some(object) => Ok(Cow::Owned(object)),
-        None => Exception::operand_type_error(left, op, right, Cow::Owned(left_object), right_object),
+        None => Exception::operand_type_error(left, op, right, Cow::Owned(left_object), Cow::Owned(right_object), heap),
     }
 }
 
@@ -97,18 +99,19 @@ fn cmp_op<'c, 'd>(
     right: &'d ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
     let left_object = evaluate(namespace, heap, left)?.into_owned();
-    let right_object = evaluate(namespace, heap, right)?;
+    let right_object = evaluate(namespace, heap, right)?.into_owned();
     let left_cow: Cow<Object> = Cow::Owned(left_object);
+    let right_cow: Cow<Object> = Cow::Borrowed(&right_object);
     match op {
         CmpOperator::Eq => Ok(left_cow.as_ref().py_eq(&right_object)),
         CmpOperator::NotEq => Ok(!left_cow.as_ref().py_eq(&right_object)),
-        CmpOperator::Gt => Ok(left_cow.gt(&right_object)),
-        CmpOperator::GtE => Ok(left_cow.ge(&right_object)),
-        CmpOperator::Lt => Ok(left_cow.lt(&right_object)),
-        CmpOperator::LtE => Ok(left_cow.le(&right_object)),
+        CmpOperator::Gt => Ok(left_cow.gt(&right_cow)),
+        CmpOperator::GtE => Ok(left_cow.ge(&right_cow)),
+        CmpOperator::Lt => Ok(left_cow.lt(&right_cow)),
+        CmpOperator::LtE => Ok(left_cow.le(&right_cow)),
         CmpOperator::ModEq(v) => match left_cow.as_ref().modulus_eq(&right_object, *v) {
             Some(b) => Ok(b),
-            None => Exception::operand_type_error(left, Operator::Mod, right, left_cow, right_object),
+            None => Exception::operand_type_error(left, Operator::Mod, right, left_cow, right_cow, heap),
         },
         _ => internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented"),
     }
@@ -132,7 +135,7 @@ fn call_function<'c, 'd>(
         .iter()
         .map(|a| evaluate(namespace, heap, a).map(|o| Cow::Owned(o.into_owned())))
         .collect::<RunResult<_>>()?;
-    builtin.call_function(args)
+    builtin.call_function(heap, args)
 }
 
 /// Handles attribute method calls like `list.append`, again threading the heap for safety.
@@ -163,5 +166,5 @@ fn attr_call<'c, 'd>(
             .with_position(expr_loc.position)
             .into());
     };
-    object.attr_call(attr, args)
+    object.attr_call(heap, attr, args)
 }

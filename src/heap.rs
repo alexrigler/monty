@@ -5,7 +5,7 @@ use crate::object::Object;
 pub type ObjectId = usize;
 
 /// HeapData captures every runtime object that must live in the arena.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HeapData {
     Str(String),
     Bytes(Vec<u8>),
@@ -27,17 +27,12 @@ struct HeapObject {
 /// entries and relies on `clear()` between runs.  This keeps identity checks
 /// simple and avoids the need for generation counters while we're still
 /// building out semantics.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Heap {
     objects: Vec<Option<HeapObject>>,
 }
 
 impl Heap {
-    /// Creates an empty heap ready to service allocations for a single executor run.
-    pub fn new() -> Self {
-        Self { objects: Vec::new() }
-    }
-
     /// Allocates a new heap object, returning the fresh identifier.
     pub fn allocate(&mut self, data: HeapData) -> ObjectId {
         let id = self.objects.len();
@@ -46,6 +41,9 @@ impl Heap {
     }
 
     /// Increments the reference count for an existing heap object.
+    ///
+    /// # Panics
+    /// Panics if the object ID is invalid or the object has already been freed.
     pub fn inc_ref(&mut self, id: ObjectId) {
         let object = self
             .objects
@@ -57,6 +55,9 @@ impl Heap {
     }
 
     /// Decrements the reference count and frees the object (plus children) once it hits zero.
+    ///
+    /// # Panics
+    /// Panics if the object ID is invalid or the object has already been freed.
     pub fn dec_ref(&mut self, id: ObjectId) {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
@@ -80,6 +81,10 @@ impl Heap {
     }
 
     /// Returns an immutable reference to the heap data stored at the given ID.
+    ///
+    /// # Panics
+    /// Panics if the object ID is invalid or the object has already been freed.
+    #[must_use]
     pub fn get(&self, id: ObjectId) -> &HeapData {
         &self
             .objects
@@ -91,6 +96,9 @@ impl Heap {
     }
 
     /// Returns a mutable reference to the heap data stored at the given ID.
+    ///
+    /// # Panics
+    /// Panics if the object ID is invalid or the object has already been freed.
     pub fn get_mut(&mut self, id: ObjectId) -> &mut HeapData {
         &mut self
             .objects
@@ -111,14 +119,20 @@ impl Heap {
 /// `dec_ref` can recursively drop entire object graphs without recursion.
 fn enqueue_children(data: &HeapData, stack: &mut Vec<ObjectId>) {
     match data {
-        HeapData::List(_items) | HeapData::Tuple(_items) => {
-            // Non-heap references will be added in later phases; keep placeholders so the
-            // match arms are ready once Object::Ref exists.
-            let _ = stack;
+        HeapData::List(items) | HeapData::Tuple(items) => {
+            // Walk through all items and enqueue any heap-allocated objects
+            for obj in items {
+                if let Object::Ref(id) = obj {
+                    stack.push(*id);
+                }
+            }
         }
         HeapData::Exception(_exc) => {
-            let _ = stack;
+            // Exceptions currently don't contain nested objects
+            // If this changes in the future, add enumeration logic here
         }
-        HeapData::Str(_) | HeapData::Bytes(_) => {}
+        HeapData::Str(_) | HeapData::Bytes(_) => {
+            // Strings and bytes don't contain nested objects
+        }
     }
 }
