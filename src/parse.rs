@@ -6,8 +6,7 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::parse_program;
 
-use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
-use crate::literal::Literal;
+use crate::expressions::{Const, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 use crate::object::Attr;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
@@ -274,10 +273,7 @@ impl<'c> Parser<'c> {
                 format_spec: _,
             } => Err(ParseError::Todo("FormattedValue")),
             ExprKind::JoinedStr { values: _ } => Err(ParseError::Todo("JoinedStr")),
-            ExprKind::Constant { value, .. } => Ok(ExprLoc::new(
-                self.convert_range(range),
-                Expr::Constant(convert_const(value)?),
-            )),
+            ExprKind::Constant { value, .. } => convert_const(value, self.convert_range(range)),
             ExprKind::Attribute {
                 value: _,
                 attr: _,
@@ -422,25 +418,29 @@ fn convert_compare_op(op: Cmpop) -> CmpOperator {
     }
 }
 
-fn convert_const(c: Constant) -> ParseResult<'static, Literal> {
-    let v = match c {
-        Constant::None => Literal::None,
-        Constant::Bool(b) => Literal::Bool(b),
-        Constant::Str(s) => Literal::Str(s),
-        Constant::Bytes(b) => Literal::Bytes(b),
+fn convert_const(c: Constant, range: CodeRange<'_>) -> ParseResult<'static, ExprLoc<'_>> {
+    let const_value = match c {
+        Constant::None => Const::None,
+        Constant::Bool(b) => Const::Bool(b),
+        Constant::Str(s) => Const::Str(s),
+        Constant::Bytes(b) => Const::Bytes(b),
         Constant::Int(big_int) => match big_int.to_i64() {
-            Some(i) => Literal::Int(i),
+            Some(i) => Const::Int(i),
             None => return Err(ParseError::Todo("BigInt Support")),
         },
         Constant::Tuple(tuple) => {
-            let t = tuple.into_iter().map(convert_const).collect::<ParseResult<_>>()?;
-            Literal::Tuple(t)
+            // unlike other variants of Constant, we store Tuples directly as expressions, not with Const
+            let items = tuple
+                .into_iter()
+                .map(|el| convert_const(el, range))
+                .collect::<ParseResult<_>>()?;
+            return Ok(ExprLoc::new(range, Expr::Tuple(items)));
         }
-        Constant::Float(f) => Literal::Float(f),
+        Constant::Float(f) => Const::Float(f),
         Constant::Complex { .. } => return Err(ParseError::Todo("complex constants")),
-        Constant::Ellipsis => Literal::Ellipsis,
+        Constant::Ellipsis => Const::Ellipsis,
     };
-    Ok(v)
+    Ok(ExprLoc::new(range, Expr::Constant(const_value)))
 }
 
 #[derive(Debug, Clone, Copy)]

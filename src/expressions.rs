@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::exceptions::ExceptionRaise;
-use crate::literal::Literal;
+use crate::heap::{Heap, HeapData};
 use crate::object::{Attr, Object};
 use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
@@ -44,7 +44,7 @@ impl fmt::Display for Function<'_> {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Expr<'c> {
-    Constant(Literal),
+    Constant(Const),
     Name(Identifier<'c>),
     Call {
         func: Function<'c>,
@@ -88,22 +88,18 @@ impl fmt::Display for Expr<'_> {
             }
             Self::Op { left, op, right } => write!(f, "{left} {op} {right}"),
             Self::CmpOp { left, op, right } => write!(f, "{left} {op} {right}"),
-            Self::List(list) => {
+            Self::List(itms) => {
                 write!(
                     f,
                     "[{}]",
-                    list.iter().map(ToString::to_string).collect::<Vec<String>>().join(", ")
+                    itms.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
                 )
             }
-            Self::Tuple(tuple) => {
+            Self::Tuple(itms) => {
                 write!(
                     f,
                     "({})",
-                    tuple
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<String>>()
-                        .join(", ")
+                    itms.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
                 )
             }
         }
@@ -112,7 +108,7 @@ impl fmt::Display for Expr<'_> {
 
 impl<'c> Expr<'c> {
     pub fn is_none(&self) -> bool {
-        matches!(self, Self::Constant(Literal::None))
+        matches!(self, Self::Constant(Const::None))
     }
 
     fn print_args(
@@ -146,6 +142,69 @@ impl<'c> Expr<'c> {
             }
         }
         write!(f, ")")
+    }
+}
+
+/// Represents values that can be produced purely from the parser/prepare pipeline.
+///
+/// Const values are intentionally detached from the runtime heap so we can keep
+/// parse-time transformations (constant folding, namespace seeding, etc.) free from
+/// reference-count semantics. Only once execution begins are these literals turned
+/// into real `Object`s that participate in the interpreter's runtime rules.
+///
+/// Note: unlike the AST `Constant` type, we store tuples only as expressions since they
+/// can't always be recorded as constants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Const {
+    Undefined,
+    Ellipsis,
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bytes(Vec<u8>),
+}
+
+impl Const {
+    /// Converts the literal into its runtime `Object` counterpart.
+    ///
+    /// This is the only place parse-time data crosses the boundary into runtime
+    /// semantics, ensuring every literal follows the same conversion path (helpful
+    /// for keeping later heap/refcount logic centralized).
+    ///
+    /// Heap-allocated types (Str, Bytes, Tuple) will be allocated on the heap and
+    /// returned as `Object::Ref` variants. Immediate values are returned inline.
+    pub fn to_object(&self, heap: &mut Heap) -> Object {
+        match self {
+            Self::Undefined => Object::Undefined,
+            Self::Ellipsis => Object::Ellipsis,
+            Self::None => Object::None,
+            Self::Bool(true) => Object::True,
+            Self::Bool(false) => Object::False,
+            Self::Int(v) => Object::Int(*v),
+            Self::Float(v) => Object::Float(*v),
+            Self::Str(s) => Object::Ref(heap.allocate(HeapData::Str(s.clone()))),
+            Self::Bytes(b) => Object::Ref(heap.allocate(HeapData::Bytes(b.clone()))),
+        }
+    }
+
+    /// Returns a Python-esque string representation for logging/debugging.
+    ///
+    /// This avoids the need to import runtime formatting helpers into parser code
+    /// while still giving enough fidelity to display constants in errors/traces.
+    pub fn repr(&self) -> String {
+        match self {
+            Self::Undefined => "Undefined".to_string(),
+            Self::Ellipsis => "...".to_string(),
+            Self::None => "None".to_string(),
+            Self::Bool(true) => "True".to_string(),
+            Self::Bool(false) => "False".to_string(),
+            Self::Int(v) => v.to_string(),
+            Self::Float(v) => v.to_string(),
+            Self::Str(v) => format!("'{v}'"),
+            Self::Bytes(v) => format!("b'{v:?}'"),
+        }
     }
 }
 

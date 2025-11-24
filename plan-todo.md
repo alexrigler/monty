@@ -4,7 +4,7 @@
 - [x] Phase 0.5: Strip parse-time optimizations that require runtime objects; re-enable once heap semantics stabilize.
 - [x] Phase 1: Introduce heap arena + reference counting fundamentals.
 - [x] Phase 2: Thread heap through evaluator and execution engine.
-- [ ] Phase 3: Move heap-worthy types (list → str/bytes → dict/set/frozenset → tuple/exception) into `HeapData` and update cloning/assignment helpers.
+- [x] Phase 3: Move heap-worthy types (list → str/bytes → dict/set/frozenset → tuple/exception) into `HeapData` and update cloning/assignment helpers.
 - [ ] Phase 3.5: Move heap-worthy Object variants (list/tuple/str/bytes/exception) into `HeapData`.
 - [ ] Phase 4: Support `is`/`is not` via object identity.
 - [ ] Phase 5: Update list/string mutation paths to work with shared references.

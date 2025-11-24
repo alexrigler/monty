@@ -3,7 +3,6 @@ mod exceptions;
 mod exit;
 mod expressions;
 mod heap;
-mod literal;
 mod object;
 mod object_types;
 mod operators;
@@ -14,9 +13,8 @@ mod run;
 
 use crate::exceptions::{InternalRunError, RunError};
 pub use crate::exit::{Exit, Value};
-use crate::expressions::Node;
+use crate::expressions::{Const, Node};
 use crate::heap::{Heap, HeapData};
-use crate::literal::Literal;
 use crate::object::Object;
 use crate::parse::parse;
 // TODO should these really be public?
@@ -31,7 +29,7 @@ use crate::run::RunFrame;
 /// objects, ensuring proper reference counting from the start of execution.
 #[derive(Debug)]
 pub struct Executor<'c> {
-    initial_namespace: Vec<Literal>,
+    initial_namespace: Vec<Const>,
     nodes: Vec<Node<'c>>,
     heap: Heap,
 }

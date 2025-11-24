@@ -3,8 +3,7 @@ use std::collections::hash_map::Entry;
 use ahash::AHashMap;
 
 use crate::exceptions::{internal_err, ExcType, ExceptionRaise, SimpleException};
-use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
-use crate::literal::Literal;
+use crate::expressions::{Const, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
@@ -13,29 +12,46 @@ use crate::parse_error::{ParseError, ParseResult};
 ///
 /// Returns the initial namespace as Literals (not runtime Objects) along with the prepared nodes.
 /// The namespace will be converted to runtime Objects when execution begins and the heap is available.
-pub(crate) fn prepare<'c>(
-    nodes: Vec<Node<'c>>,
-    input_names: &[&str],
-) -> ParseResult<'c, (Vec<Literal>, Vec<Node<'c>>)> {
+pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseResult<'c, (Vec<Const>, Vec<Node<'c>>)> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
     let new_nodes = p.prepare_nodes(nodes)?;
     Ok((p.namespace, new_nodes))
 }
 
+/// State machine for the preparation phase that transforms parsed AST nodes into an executable form.
+///
+/// This struct maintains the mapping between variable names and their namespace indices,
+/// builds the initial namespace with Literals (pre-runtime), and handles scope resolution.
+/// The preparation phase is crucial for converting string-based name lookups into efficient
+/// integer-indexed namespace access during execution.
 struct Prepare {
+    /// Maps variable names to their indices in the namespace vector
     name_map: AHashMap<String, usize>,
-    namespace: Vec<Literal>,
-    /// Root frame is the outer frame of the script, e.g. the "global" scope
+    /// The namespace vector storing Literal values, one per unique variable name.
+    /// Undefined literals are used as placeholders for variables not yet assigned.
+    namespace: Vec<Const>,
+    /// Root frame is the outer frame of the script, e.g. the "global" scope.
+    /// When true, the last expression in a block is implicitly returned.
     root_frame: bool,
 }
 
 impl Prepare {
+    /// Creates a new Prepare instance with pre-populated input names.
+    ///
+    /// Input names are typically function parameters or external variables that are
+    /// already defined when execution begins. They are given sequential namespace indices
+    /// starting from 0.
+    ///
+    /// # Arguments
+    /// * `capacity` - Expected number of nodes, used to preallocate the name map
+    /// * `input_names` - Names that should be pre-registered in the namespace (e.g., function parameters)
+    /// * `root_frame` - Whether this is the root/global scope (affects return behavior)
     fn new(capacity: usize, input_names: &[&str], root_frame: bool) -> Self {
         let mut name_map = AHashMap::with_capacity(capacity);
         for (index, name) in input_names.iter().enumerate() {
             name_map.insert((*name).to_string(), index);
         }
-        let namespace = vec![Literal::Undefined; name_map.len()];
+        let namespace = vec![Const::Undefined; name_map.len()];
         Self {
             name_map,
             namespace,
@@ -43,6 +59,16 @@ impl Prepare {
         }
     }
 
+    /// Recursively prepares a sequence of AST nodes by resolving names and transforming expressions.
+    ///
+    /// This method processes each node type differently:
+    /// - Resolves variable names to namespace indices
+    /// - Transforms function calls from identifier-based to builtin type-based
+    /// - Handles special cases like implicit returns in root frames
+    /// - Validates that names used in attribute calls are already defined
+    ///
+    /// # Returns
+    /// A vector of prepared nodes ready for execution
     fn prepare_nodes<'c>(&mut self, nodes: Vec<Node<'c>>) -> ParseResult<'c, Vec<Node<'c>>> {
         let nodes_len = nodes.len();
         let mut new_nodes = Vec::with_capacity(nodes_len);
@@ -51,7 +77,9 @@ impl Prepare {
                 Node::Pass => (),
                 Node::Expr(expr) => {
                     let expr = self.prepare_expression(expr)?;
-                    // if we're in the root frame, and the expr is the last node, and it's not None, return it
+                    // In the root frame (global scope), the last expression is implicitly returned
+                    // if it's not None. This matches Python REPL behavior where the last expression
+                    // value is displayed/returned.
                     if self.root_frame && index == nodes_len - 1 && !expr.expr.is_none() {
                         new_nodes.push(Node::Return(expr));
                     } else {
@@ -68,7 +96,9 @@ impl Prepare {
                         Some(expr) => {
                             match expr.expr {
                                 Expr::Name(id) => {
-                                    // this is raising an exception type, e.g. `raise TypeError`
+                                    // Handle raising an exception type without instantiation, e.g. `raise TypeError`.
+                                    // This is transformed into a call: `raise TypeError()` so the exception
+                                    // is properly instantiated before being raised.
                                     let expr = Expr::Call {
                                         func: Function::Builtin(Types::find(&id.name)?),
                                         args: vec![],
@@ -117,6 +147,18 @@ impl Prepare {
         Ok(new_nodes)
     }
 
+    /// Prepares an expression by resolving names, transforming calls, and applying optimizations.
+    ///
+    /// Key transformations performed:
+    /// - Name lookups are resolved to namespace indices via `get_id`
+    /// - Function calls are resolved from identifiers to builtin types
+    /// - Attribute calls validate that the object is already defined (not a new name)
+    /// - Lists and tuples are recursively prepared
+    /// - Modulo equality patterns like `x % n == k` (constant right-hand side) are optimized to
+    ///   `CmpOperator::ModEq`
+    ///
+    /// # Errors
+    /// Returns a NameError if an attribute call references an undefined variable
     fn prepare_expression<'c>(&mut self, loc_expr: ExprLoc<'c>) -> ParseResult<'c, ExprLoc<'c>> {
         let ExprLoc { position, expr } = loc_expr;
         let expr = match expr {
@@ -150,6 +192,9 @@ impl Prepare {
                 kwargs,
             } => {
                 let (object, is_new) = self.get_id(object);
+                // Unlike regular name lookups, attribute calls require the object to already exist.
+                // Calling a method on an undefined variable should fail at prepare-time, not runtime.
+                // Example: `undefined_var.method()` should raise NameError here.
                 if is_new {
                     let exc: ExceptionRaise = SimpleException::new(ExcType::NameError, Some(object.name.into())).into();
                     return Err(exc.into());
@@ -178,9 +223,14 @@ impl Prepare {
             }
         };
 
+        // Optimization: Transform `(x % n) == value` with any constant right-hand side into a
+        // specialized ModEq operator.
+        // This is a common pattern in competitive programming (e.g., FizzBuzz checks like `i % 3 == 0`)
+        // and can be executed more efficiently with a single modulo operation + comparison
+        // instead of separate modulo, then equality check.
         if let Expr::CmpOp { left, op, right } = &expr {
             if op == &CmpOperator::Eq {
-                if let Expr::Constant(Literal::Int(value)) = right.expr {
+                if let Expr::Constant(Const::Int(value)) = right.expr {
                     if let Expr::Op {
                         left: left2,
                         op,
@@ -206,16 +256,28 @@ impl Prepare {
         Ok(ExprLoc { position, expr })
     }
 
+    /// Prepares a keyword argument by preparing its value expression.
+    ///
+    /// # TODO / Limitation
+    /// Keyword names currently stay as raw identifiers because they represent argument labels,
+    /// not namespace-bound variables. Revisit when kwargs gain full support (we may switch keys
+    /// to strings or resolve them explicitly).
     fn prepare_kwarg<'c>(&mut self, kwarg: Kwarg<'c>) -> ParseResult<'c, Kwarg<'c>> {
         let Kwarg { key, value } = kwarg;
         let value = self.prepare_expression(value)?;
-        // WARNING: we're not setting the id on key here, this needs doing when we implement kwargs
-        // or maybe key should be a string?
+        // Keyword identifiers are left untouched for now (see docstring above).
         Ok(Kwarg { key, value })
     }
 
-    /// either return the id for a name, or insert that name and get its ID
-    /// returns (id, whether the id is newly added)
+    /// Resolves an identifier to its namespace index, creating a new entry if needed.
+    ///
+    /// This is the core name resolution mechanism. If the name already exists in the name_map,
+    /// its existing index is returned. If it's a new name, it's added to both the name_map
+    /// and namespace (as Literal::Undefined), and assigned the next available index.
+    ///
+    /// # Returns
+    /// A tuple of (resolved Identifier with id set, whether this is a new name).
+    /// The boolean is true if this name was just added to the namespace.
     fn get_id<'c>(&mut self, ident: Identifier<'c>) -> (Identifier<'c>, bool) {
         let (id, is_new) = match self.name_map.entry(ident.name.clone()) {
             Entry::Occupied(e) => {
@@ -223,8 +285,9 @@ impl Prepare {
                 (*id, false)
             }
             Entry::Vacant(e) => {
+                // New name: allocate next index and add Undefined placeholder
                 let id = self.namespace.len();
-                self.namespace.push(Literal::Undefined);
+                self.namespace.push(Const::Undefined);
                 e.insert(id);
                 (id, true)
             }
@@ -239,6 +302,13 @@ impl Prepare {
         )
     }
 
+    /// Prepares positional and keyword arguments for a function call.
+    ///
+    /// All argument expressions are recursively prepared through `prepare_expression`
+    /// and `prepare_kwarg`, resolving any names and transforming nested calls.
+    ///
+    /// # Returns
+    /// A tuple of (prepared args vector, prepared kwargs vector)
     fn get_args_kwargs<'c>(
         &mut self,
         args: Vec<ExprLoc<'c>>,
