@@ -75,3 +75,5 @@ too repetitive, verbose and hard to read and update.
 ## NOTES
 
 ALWAYS run `make lint` after making changes and fix all suggestions to maintain code quality.
+
+ALWAYS update this file when it is out of date.

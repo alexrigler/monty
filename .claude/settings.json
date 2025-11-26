@@ -1,0 +1,21 @@
+{
+	"permissions": {
+		"allow": [
+			"Bash(cargo build:*)",
+			"Bash(cargo clippy:*)",
+			"Bash(make lint:*)",
+			"Bash(cargo test:*)",
+			"Bash(cargo bench:*)",
+			"Bash(mkdir:*)",
+			"Bash(cargo fmt:*)",
+			"Bash(uv run:*)",
+			"Bash(for f in test_cases/*.py)",
+			"Bash(do head -1 \"$f\")",
+			"Bash(echo:*)",
+			"Bash(done)",
+			"Bash(while read base)"
+		],
+		"deny": [],
+		"ask": []
+	}
+}

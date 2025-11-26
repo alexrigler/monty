@@ -5,5 +5,5 @@
 /*.py
 /TODO.md
 /monty
-/.claude/
+/.claude/settings.local.json
 /scratch/
