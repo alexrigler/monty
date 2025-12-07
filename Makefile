@@ -18,7 +18,7 @@ lint-rs:  ## Lint Rust code with fmt and clippy
 	@cargo fmt --version
 	cargo fmt --all
 	@cargo clippy --version
-	cargo clippy --tests -- -D warnings -A incomplete_features
+	cargo clippy --tests --bench main -- -D warnings -A incomplete_features
 	cargo clippy --tests --all-features -- -D warnings -A incomplete_features
 
 .PHONY: lint-py

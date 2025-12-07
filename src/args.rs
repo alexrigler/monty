@@ -3,8 +3,8 @@ use std::fmt::{self, Write};
 use crate::{
     exceptions::ExcType,
     expressions::{ExprLoc, Identifier},
-    object::Object,
     run::RunResult,
+    value::Value,
     ParseError,
 };
 
@@ -14,15 +14,15 @@ use crate::{
 /// Most Python method calls have at most 2 arguments, so this optimization
 /// eliminates the Vec heap allocation overhead for the vast majority of calls.
 #[derive(Debug)]
-pub enum ArgObjects<'c, 'e> {
+pub enum ArgValues<'c, 'e> {
     Zero,
-    One(Object<'c, 'e>),
-    Two(Object<'c, 'e>, Object<'c, 'e>),
-    Many(Vec<Object<'c, 'e>>),
+    One(Value<'c, 'e>),
+    Two(Value<'c, 'e>, Value<'c, 'e>),
+    Many(Vec<Value<'c, 'e>>),
     // TODO kwarg types
 }
 
-impl<'c, 'e> ArgObjects<'c, 'e> {
+impl<'c, 'e> ArgValues<'c, 'e> {
     /// Checks that zero arguments were passed.
     pub fn check_zero_args(&self, name: &str) -> RunResult<'static, ()> {
         match self {
@@ -32,7 +32,7 @@ impl<'c, 'e> ArgObjects<'c, 'e> {
     }
 
     /// Checks that exactly one argument was passed, returning it.
-    pub fn get_one_arg(self, name: &str) -> RunResult<'static, Object<'c, 'e>> {
+    pub fn get_one_arg(self, name: &str) -> RunResult<'static, Value<'c, 'e>> {
         match self {
             Self::One(a) => Ok(a),
             _ => Err(ExcType::type_error_arg_count(name, 1, self.count())),
@@ -40,7 +40,7 @@ impl<'c, 'e> ArgObjects<'c, 'e> {
     }
 
     /// Checks that exactly two arguments were passed, returning them as a tuple.
-    pub fn get_two_args(self, name: &str) -> RunResult<'static, (Object<'c, 'e>, Object<'c, 'e>)> {
+    pub fn get_two_args(self, name: &str) -> RunResult<'static, (Value<'c, 'e>, Value<'c, 'e>)> {
         match self {
             Self::Two(a1, a2) => Ok((a1, a2)),
             _ => Err(ExcType::type_error_arg_count(name, 2, self.count())),
@@ -48,7 +48,7 @@ impl<'c, 'e> ArgObjects<'c, 'e> {
     }
 
     /// Checks that one or two arguments were passed, returning them as a tuple.
-    pub fn get_one_two_args(self, name: &str) -> RunResult<'static, (Object<'c, 'e>, Option<Object<'c, 'e>>)> {
+    pub fn get_one_two_args(self, name: &str) -> RunResult<'static, (Value<'c, 'e>, Option<Value<'c, 'e>>)> {
         match self {
             Self::One(a) => Ok((a, None)),
             Self::Two(a1, a2) => Ok((a1, Some(a2))),
@@ -58,7 +58,7 @@ impl<'c, 'e> ArgObjects<'c, 'e> {
     }
 
     /// Create a new namespace for a function arguments
-    pub fn inject_into_namespace(self, namespace: &mut Vec<Object<'c, 'e>>) {
+    pub fn inject_into_namespace(self, namespace: &mut Vec<Value<'c, 'e>>) {
         match self {
             Self::Zero => (),
             Self::One(a) => {

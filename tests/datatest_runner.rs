@@ -1,6 +1,6 @@
-use monty::{Executor, Exit};
+use ahash::AHashMap;
+use monty::{Executor, RunError};
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -39,7 +39,7 @@ enum Expectation {
     ReturnType(String),
     /// Expect successful execution, check ref counts of named variables.
     /// Only used when `ref-counting` feature is enabled; skipped otherwise.
-    RefCounts(#[cfg_attr(not(feature = "ref-counting"), allow(dead_code))] HashMap<String, usize>),
+    RefCounts(#[cfg_attr(not(feature = "ref-counting"), allow(dead_code))] AHashMap<String, usize>),
 }
 
 impl Expectation {
@@ -131,8 +131,8 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestTargets) {
 ///
 /// Supports both single and double quotes for variable names.
 /// Example: {'x': 2, 'y': 1} or {"x": 2, "y": 1}
-fn parse_ref_counts(s: &str) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
+fn parse_ref_counts(s: &str) -> AHashMap<String, usize> {
+    let mut counts = AHashMap::new();
     let trimmed = s.trim().trim_start_matches('{').trim_end_matches('}');
     for pair in trimmed.split(',') {
         let pair = pair.trim();
@@ -168,7 +168,7 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
             Ok(ex) => {
                 let result = ex.run_ref_counts(vec![]);
                 match result {
-                    Ok((Exit::Return(_), (actual, unique_refs, heap_count))) => {
+                    Ok((_, (actual, unique_refs, heap_count))) => {
                         // Strict matching: verify all heap objects are accounted for by variables
                         assert_eq!(
                             unique_refs, heap_count,
@@ -177,9 +177,6 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                              Actual ref counts: {actual:?}"
                         );
                         assert_eq!(&actual, expected, "[{test_name}] ref-counts mismatch");
-                    }
-                    Ok((Exit::Raise(exc), _)) => {
-                        panic!("[{test_name}] Unexpected exception: {exc:?}");
                     }
                     Err(e) => panic!("[{test_name}] Runtime error: {e:?}"),
                 }
@@ -195,18 +192,18 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
         Ok(ex) => {
             let result = ex.run(vec![]);
             match result {
-                Ok(Exit::Return(obj)) => match expectation {
+                Ok(obj) => match expectation {
                     Expectation::ReturnStr(expected) => {
-                        let output = obj.py_str();
-                        assert_eq!(output.as_ref(), expected, "[{test_name}] py_str() mismatch");
+                        let output = obj.to_string();
+                        assert_eq!(output, expected, "[{test_name}] str() mismatch");
                     }
                     Expectation::Return(expected) => {
                         let output = obj.py_repr();
-                        assert_eq!(output.as_ref(), expected, "[{test_name}] py_repr() mismatch");
+                        assert_eq!(output, expected, "[{test_name}] py_repr() mismatch");
                     }
                     Expectation::ReturnType(expected) => {
-                        let output = obj.py_type();
-                        assert_eq!(output, expected, "[{test_name}] py_type() mismatch");
+                        let output = obj.type_name();
+                        assert_eq!(output, expected, "[{test_name}] type_name() mismatch");
                     }
                     #[cfg(not(feature = "ref-counting"))]
                     Expectation::RefCounts(_) => {
@@ -214,15 +211,18 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                     }
                     _ => panic!("[{test_name}] Expected return, got different expectation type"),
                 },
-                Ok(Exit::Raise(exc)) => {
+                Err(e) => {
                     if let Expectation::Raise(expected) = expectation {
-                        let output = format!("{}", exc.exc);
+                        // Extract just the exception part without traceback
+                        let output = match &e {
+                            RunError::Exc(exc) => exc.exc.to_string(),
+                            RunError::Internal(internal) => internal.to_string(),
+                        };
                         assert_eq!(output, expected, "[{test_name}] Exception mismatch");
                     } else {
-                        panic!("[{test_name}] Unexpected exception: {exc:?}");
+                        panic!("[{test_name}] Unexpected error: {e:?}");
                     }
                 }
-                Err(e) => panic!("[{test_name}] Runtime error: {e:?}"),
             }
         }
         Err(parse_err) => {

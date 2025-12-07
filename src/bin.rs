@@ -16,7 +16,7 @@ fn main() -> ExitCode {
         }
     };
     // let input_names = vec!["foo", "bar"];
-    // let inputs = vec![Object::Int(1), Object::Int(2)];
+    // let inputs = vec![Value::Int(1), Value::Int(2)];
     let input_names = vec![];
     let inputs = vec![];
 

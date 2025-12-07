@@ -9,28 +9,28 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use crate::args::ArgObjects;
+use crate::args::ArgValues;
 use crate::exceptions::ExcType;
-use crate::heap::{Heap, ObjectId};
-use crate::object::{Attr, Object};
+use crate::heap::{Heap, HeapId};
 use crate::run::RunResult;
+use crate::value::{Attr, Value};
 
 /// Common operations for heap-allocated Python values.
 ///
 /// Implementers should provide Python-compatible semantics for all operations.
 /// Most methods take a `&Heap` reference to allow nested lookups for containers
-/// holding `Object::Ref` values.
+/// holding `Value::Ref` values.
 ///
 /// This trait is used with `enum_dispatch` on `HeapData` to enable efficient
 /// virtual dispatch without boxing overhead.
 ///
 /// The lifetime `'e` represents the lifetime of borrowed data (e.g., interned strings)
-/// that may be contained within Objects.
-pub trait PyValue<'c, 'e> {
+/// that may be contained within Values.
+pub trait PyTrait<'c, 'e> {
     /// Returns the Python type name for this value (e.g., "list", "str").
     ///
     /// Used for error messages and the `type()` builtin.
-    /// Takes heap reference for cases where nested Object lookups are needed.
+    /// Takes heap reference for cases where nested Value lookups are needed.
     fn py_type(&self, heap: &Heap<'c, 'e>) -> &'static str;
 
     /// Returns the number of elements in this container.
@@ -55,15 +55,15 @@ pub trait PyValue<'c, 'e> {
         None
     }
 
-    /// Pushes any contained `ObjectId`s onto the stack for reference counting.
+    /// Pushes any contained `HeapId`s onto the stack for reference counting.
     ///
     /// This is called during `dec_ref` to find nested heap references that
-    /// need their refcounts decremented when this object is freed.
+    /// need their refcounts decremented when this value is freed.
     ///
     /// When the `dec-ref-check` feature is enabled, this method also marks all
-    /// contained `Object`s as `Dereferenced` to prevent Drop panics. This
+    /// contained `Value`s as `Dereferenced` to prevent Drop panics. This
     /// co-locates the cleanup logic with the reference collection logic.
-    fn py_dec_ref_ids(&mut self, stack: &mut Vec<ObjectId>);
+    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>);
 
     /// Returns the truthiness of the value following Python semantics.
     ///
@@ -81,17 +81,17 @@ pub trait PyValue<'c, 'e> {
     }
 
     /// Python addition (`__add__`).
-    fn py_add(&self, _other: &Self, _heap: &mut Heap<'c, 'e>) -> Option<Object<'c, 'e>> {
+    fn py_add(&self, _other: &Self, _heap: &mut Heap<'c, 'e>) -> Option<Value<'c, 'e>> {
         None
     }
 
     /// Python subtraction (`__sub__`).
-    fn py_sub(&self, _other: &Self, _heap: &mut Heap<'c, 'e>) -> Option<Object<'c, 'e>> {
+    fn py_sub(&self, _other: &Self, _heap: &mut Heap<'c, 'e>) -> Option<Value<'c, 'e>> {
         None
     }
 
     /// Python modulus (`__mod__`).
-    fn py_mod(&self, _other: &Self) -> Option<Object<'c, 'e>> {
+    fn py_mod(&self, _other: &Self) -> Option<Value<'c, 'e>> {
         None
     }
 
@@ -105,7 +105,7 @@ pub trait PyValue<'c, 'e> {
     /// # Returns
     ///
     /// Returns `true` if the operation was successful, `false` otherwise.
-    fn py_iadd(&mut self, _other: Object<'c, 'e>, _heap: &mut Heap<'c, 'e>, _self_id: Option<ObjectId>) -> bool {
+    fn py_iadd(&mut self, _other: Value<'c, 'e>, _heap: &mut Heap<'c, 'e>, _self_id: Option<HeapId>) -> bool {
         false
     }
 
@@ -116,8 +116,8 @@ pub trait PyValue<'c, 'e> {
         &mut self,
         heap: &mut Heap<'c, 'e>,
         attr: &Attr,
-        _args: ArgObjects<'c, 'e>,
-    ) -> RunResult<'c, Object<'c, 'e>> {
+        _args: ArgValues<'c, 'e>,
+    ) -> RunResult<'c, Value<'c, 'e>> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
     }
 
@@ -130,7 +130,7 @@ pub trait PyValue<'c, 'e> {
     /// the returned value.
     ///
     /// Default implementation returns TypeError.
-    fn py_getitem(&self, _key: &Object<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Object<'c, 'e>> {
+    fn py_getitem(&self, _key: &Value<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Value<'c, 'e>> {
         Err(ExcType::type_error_not_sub(self.py_type(heap)))
     }
 
@@ -140,12 +140,7 @@ pub trait PyValue<'c, 'e> {
     /// or the type doesn't support subscript assignment.
     ///
     /// Default implementation returns TypeError.
-    fn py_setitem(
-        &mut self,
-        _key: Object<'c, 'e>,
-        _value: Object<'c, 'e>,
-        heap: &mut Heap<'c, 'e>,
-    ) -> RunResult<'c, ()> {
+    fn py_setitem(&mut self, _key: Value<'c, 'e>, _value: Value<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, ()> {
         Err(ExcType::TypeError).map_err(|e| {
             crate::exceptions::exc_fmt!(e; "'{}' object does not support item assignment", self.py_type(heap)).into()
         })

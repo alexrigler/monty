@@ -5,15 +5,15 @@ use std::hash::{Hash, Hasher};
 
 use strum::{Display, EnumString, IntoStaticStr};
 
-use crate::args::ArgObjects;
+use crate::args::ArgValues;
 use crate::expressions::ExprLoc;
 use crate::heap::HeapData;
-use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse::CodeRange;
 use crate::run::RunResult;
+use crate::value::{Attr, Value};
 use crate::values::str::string_repr;
-use crate::values::PyValue;
+use crate::values::PyTrait;
 use crate::Heap;
 
 /// Python exception types supported by the interpreter.
@@ -37,19 +37,15 @@ impl ExcType {
     ///
     /// Handles exception constructors like `ValueError('message')`.
     /// Currently supports zero or one string argument.
-    pub(crate) fn call<'c, 'e>(
-        self,
-        heap: &mut Heap<'c, 'e>,
-        args: ArgObjects<'c, 'e>,
-    ) -> RunResult<'c, Object<'c, 'e>> {
+    pub(crate) fn call<'c, 'e>(self, heap: &mut Heap<'c, 'e>, args: ArgValues<'c, 'e>) -> RunResult<'c, Value<'c, 'e>> {
         match args {
-            ArgObjects::Zero => Ok(Object::Exc(SimpleException::new(self, None))),
-            ArgObjects::One(Object::InternString(s)) => {
-                Ok(Object::Exc(SimpleException::new(self, Some(s.to_owned().into()))))
+            ArgValues::Zero => Ok(Value::Exc(SimpleException::new(self, None))),
+            ArgValues::One(Value::InternString(s)) => {
+                Ok(Value::Exc(SimpleException::new(self, Some(s.to_owned().into()))))
             }
-            ArgObjects::One(Object::Ref(object_id)) => {
-                if let HeapData::Str(s) = heap.get(object_id) {
-                    Ok(Object::Exc(SimpleException::new(
+            ArgValues::One(Value::Ref(heap_id)) => {
+                if let HeapData::Str(s) = heap.get(heap_id) {
+                    Ok(Value::Exc(SimpleException::new(
                         self,
                         Some(s.as_str().to_owned().into()),
                     )))
@@ -86,10 +82,10 @@ impl ExcType {
     /// For string keys, uses the raw string value without extra quoting.
     /// For other types, uses repr.
     #[must_use]
-    pub fn key_error(key: &Object<'_, '_>, heap: &Heap<'_, '_>) -> RunError<'static> {
+    pub fn key_error(key: &Value<'_, '_>, heap: &Heap<'_, '_>) -> RunError<'static> {
         let key_str = match key {
-            Object::InternString(s) => (*s).to_owned(),
-            Object::Ref(id) => {
+            Value::InternString(s) => (*s).to_owned(),
+            Value::Ref(id) => {
                 if let HeapData::Str(s) = heap.get(*id) {
                     s.as_str().to_owned()
                 } else {
@@ -215,6 +211,16 @@ impl<'c> SimpleException<'c> {
     #[must_use]
     pub fn new(exc_type: ExcType, arg: Option<Cow<'c, str>>) -> Self {
         SimpleException { exc_type, arg }
+    }
+
+    #[must_use]
+    pub fn exc_type(&self) -> ExcType {
+        self.exc_type
+    }
+
+    #[must_use]
+    pub fn arg(&self) -> Option<&Cow<'c, str>> {
+        self.arg.as_ref()
     }
 
     pub(crate) fn type_str(&self) -> &'static str {

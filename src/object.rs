@@ -1,846 +1,497 @@
-use std::borrow::Cow;
-use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::{
+    fmt::{self, Write},
+    hash::{Hash, Hasher},
+};
 
-use strum::Display;
+use indexmap::IndexMap;
 
-use crate::args::ArgObjects;
-use crate::callable::Callable;
-use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
-use crate::function::Function;
-use crate::heap::HeapData;
-use crate::heap::{Heap, ObjectId};
-use crate::run::RunResult;
-use crate::values::bytes::bytes_repr;
-use crate::values::str::string_repr;
-use crate::values::PyValue;
+use crate::{
+    exceptions::{ExcType, SimpleException},
+    expressions::FrameExit,
+    heap::{Heap, HeapData},
+    value::Value,
+    values::{
+        bytes::{bytes_repr, Bytes},
+        dict::Dict,
+        list::List,
+        str::{string_repr, Str},
+        tuple::Tuple,
+        PyTrait,
+    },
+};
 
-/// Primary value type representing Python objects at runtime.
+/// A Python value that can be passed to or returned from the interpreter.
 ///
-/// This enum uses a hybrid design: small immediate values (Int, Bool, None) are stored
-/// inline, while heap-allocated objects (List, Str, Dict, etc.) are stored in the arena
-/// and referenced via `Ref(ObjectId)`.
+/// This is the public-facing type for Python values. It owns all its data and can be
+/// freely cloned, serialized, or stored. Unlike the internal `Value` type, `PyObject`
+/// does not require a heap for operations.
 ///
-/// NOTE: `Clone` is intentionally NOT derived. Use `clone_with_heap()` for heap objects
-/// or `clone_immediate()` for immediate values only. Direct cloning via `.clone()` would
-/// bypass reference counting and cause memory leaks.
-#[derive(Debug)]
-pub enum Object<'c, 'e> {
-    // Immediate values (stored inline, no heap allocation)
-    Undefined,
+/// # Input vs Output Variants
+///
+/// Most variants can be used both as inputs (passed to `Executor::run()`) and outputs
+/// (returned from execution). However:
+/// - `Repr` is output-only: represents values that have no direct `PyObject` mapping
+/// - `Exception` can be used as input (to raise) or output (when code raises)
+///
+/// # Hashability
+///
+/// Only immutable variants (`None`, `Ellipsis`, `Bool`, `Int`, `Float`, `String`, `Bytes`)
+/// implement `Hash`. Attempting to hash mutable variants (`List`, `Dict`) will panic.
+#[derive(Debug, Clone)]
+pub enum PyObject {
+    /// Python's `Ellipsis` singleton (`...`).
     Ellipsis,
+    /// Python's `None` singleton.
     None,
+    /// Python boolean (`True` or `False`).
     Bool(bool),
+    /// Python integer (64-bit signed).
     Int(i64),
+    /// Python float (64-bit IEEE 754).
     Float(f64),
-    Range(i64),
-    InternString(&'e str),
-    InternBytes(&'e [u8]),
-    /// Exception instance (e.g., result of `ValueError('msg')`).
-    Exc(SimpleException<'c>),
-    /// Callables, nested enum to make calling easier, allow private until Object is privates
-    #[allow(private_interfaces)]
-    Callable(Callable<'c>),
-    /// A function defined in the module
-    #[allow(private_interfaces)]
-    Function(&'e Function<'c>),
-
-    // Heap-allocated values (stored in arena)
-    Ref(ObjectId),
-
-    /// Sentinel value indicating this Object was properly cleaned up via `drop_with_heap`.
-    /// Only exists when `dec-ref-check` feature is enabled. Used to verify reference counting
-    /// correctness - if a `Ref` variant is dropped without calling `drop_with_heap`, the
-    /// Drop impl will panic.
-    #[cfg(feature = "dec-ref-check")]
-    Dereferenced,
+    /// Python string (UTF-8).
+    String(String),
+    /// Python bytes object.
+    Bytes(Vec<u8>),
+    /// Python list (mutable sequence).
+    List(Vec<PyObject>),
+    /// Python tuple (immutable sequence).
+    Tuple(Vec<PyObject>),
+    /// Python dictionary (insertion-ordered mapping).
+    Dict(IndexMap<PyObject, PyObject>),
+    /// Python exception with type and optional message argument.
+    Exception {
+        /// The exception type (e.g., `ValueError`, `TypeError`).
+        exc_type: ExcType,
+        /// Optional string argument passed to the exception constructor.
+        arg: Option<String>,
+    },
+    /// Fallback for values that cannot be represented as other variants.
+    ///
+    /// Contains the `repr()` string of the original value. This is output-only
+    /// and cannot be used as an input to `Executor::run()`.
+    Repr(String),
 }
 
-/// Drop implementation that panics if a `Ref` variant is dropped without calling `drop_with_heap`.
-/// This helps catch reference counting bugs during development/testing.
-/// Only enabled when the `dec-ref-check` feature is active.
-#[cfg(feature = "dec-ref-check")]
-impl Drop for Object<'_, '_> {
-    fn drop(&mut self) {
-        if let Object::Ref(id) = self {
-            panic!("Object::Ref({id}) dropped without calling drop_with_heap() - this is a reference counting bug");
+impl fmt::Display for PyObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::String(s) => f.write_str(s),
+            _ => self.repr_fmt(f),
         }
     }
 }
 
-impl From<bool> for Object<'_, '_> {
-    fn from(v: bool) -> Self {
-        Self::Bool(v)
+impl PyObject {
+    /// Converts a `FrameExit` into a `PyObject`, properly handling reference counting.
+    ///
+    /// Takes ownership of the `FrameExit` and its contained `Value`, extracts the value,
+    /// then properly drops the Value via `drop_with_heap` to maintain reference counting.
+    pub(crate) fn new<'c, 'e>(exit: FrameExit<'c, 'e>, heap: &mut Heap<'c, 'e>) -> Self {
+        match exit {
+            FrameExit::Return(obj) => {
+                let value = Self::from_value(&obj, heap);
+                obj.drop_with_heap(heap);
+                value
+            }
+        }
     }
-}
 
-impl<'c, 'e> PyValue<'c, 'e> for Object<'c, 'e> {
-    fn py_type(&self, heap: &Heap<'c, 'e>) -> &'static str {
+    /// Converts this `PyObject` into an `Value`, allocating on the heap if needed.
+    ///
+    /// Immediate values (None, Bool, Int, Float, Ellipsis, Exception) are created directly.
+    /// Heap-allocated values (String, Bytes, List, Tuple, Dict) are allocated
+    /// via the heap and wrapped in `Value::Ref`.
+    ///
+    /// # Errors
+    /// Returns `InvalidInputError` if called on the `Repr` variant,
+    /// as it is only valid as an output from code execution, not as an input.
+    pub(crate) fn to_value<'c, 'e>(self, heap: &mut Heap<'c, 'e>) -> Result<Value<'c, 'e>, InvalidInputError> {
         match self {
-            Self::Undefined => "undefined",
-            Self::Ellipsis => "ellipsis",
+            Self::Ellipsis => Ok(Value::Ellipsis),
+            Self::None => Ok(Value::None),
+            Self::Bool(b) => Ok(Value::Bool(b)),
+            Self::Int(i) => Ok(Value::Int(i)),
+            Self::Float(f) => Ok(Value::Float(f)),
+            Self::String(s) => Ok(Value::Ref(heap.allocate(HeapData::Str(Str::new(s))))),
+            Self::Bytes(b) => Ok(Value::Ref(heap.allocate(HeapData::Bytes(Bytes::new(b))))),
+            Self::List(items) => {
+                let values: Vec<Value<'c, 'e>> = items
+                    .into_iter()
+                    .map(|item| item.to_value(heap))
+                    .collect::<Result<_, _>>()?;
+                Ok(Value::Ref(heap.allocate(HeapData::List(List::new(values)))))
+            }
+            Self::Tuple(items) => {
+                let values: Vec<Value<'c, 'e>> = items
+                    .into_iter()
+                    .map(|item| item.to_value(heap))
+                    .collect::<Result<_, _>>()?;
+                Ok(Value::Ref(heap.allocate(HeapData::Tuple(Tuple::from_vec(values)))))
+            }
+            Self::Dict(map) => {
+                let pairs: Result<Vec<(Value<'c, 'e>, Value<'c, 'e>)>, InvalidInputError> = map
+                    .into_iter()
+                    .map(|(k, v)| Ok((k.to_value(heap)?, v.to_value(heap)?)))
+                    .collect();
+                // PyObject Dict keys are already validated as hashable, so unwrap is safe
+                let dict = Dict::from_pairs(pairs?, heap).expect("PyObject Dict should only contain hashable keys");
+                Ok(Value::Ref(heap.allocate(HeapData::Dict(dict))))
+            }
+            Self::Exception { exc_type, arg } => {
+                let exc = SimpleException::new(exc_type, arg.map(Into::into));
+                Ok(Value::Exc(exc))
+            }
+            Self::Repr(_) => Err(InvalidInputError::new("Repr")),
+        }
+    }
+
+    fn from_value(object: &Value, heap: &Heap) -> Self {
+        match object {
+            Value::Undefined => panic!("Undefined found while converting to PyObject"),
+            Value::Ellipsis => Self::Ellipsis,
+            Value::None => Self::None,
+            Value::Bool(b) => Self::Bool(*b),
+            Value::Int(i) => Self::Int(*i),
+            Value::Float(f) => Self::Float(*f),
+            Value::InternString(s) => Self::String((*s).to_owned()),
+            Value::InternBytes(b) => Self::Bytes((*b).to_owned()),
+            Value::Exc(exc) => Self::Exception {
+                exc_type: exc.exc_type(),
+                arg: exc.arg().map(ToString::to_string),
+            },
+            Value::Ref(id) => match heap.get(*id) {
+                HeapData::Str(s) => Self::String(s.as_str().to_owned()),
+                HeapData::Bytes(b) => Self::Bytes(b.as_slice().to_owned()),
+                HeapData::List(list) => Self::List(
+                    list.as_vec()
+                        .iter()
+                        .map(|obj| PyObject::from_value(obj, heap))
+                        .collect(),
+                ),
+                HeapData::Tuple(tuple) => Self::Tuple(
+                    tuple
+                        .as_vec()
+                        .iter()
+                        .map(|obj| PyObject::from_value(obj, heap))
+                        .collect(),
+                ),
+                HeapData::Dict(dict) => {
+                    let mut new_dict = IndexMap::with_capacity(dict.as_index_map().len());
+                    for bucket in dict.as_index_map().values() {
+                        for (k, v) in bucket {
+                            new_dict.insert(PyObject::from_value(k, heap), PyObject::from_value(v, heap));
+                        }
+                    }
+                    Self::Dict(new_dict)
+                }
+            },
+            #[cfg(feature = "dec-ref-check")]
+            Value::Dereferenced => panic!("Dereferenced found while converting to PyObject"),
+            _ => Self::Repr(object.py_repr(heap).into_owned()),
+        }
+    }
+
+    /// Returns the Python `repr()` string for this value.
+    ///
+    /// # Panics
+    /// Could panic if out of memory.
+    #[must_use]
+    pub fn py_repr(&self) -> String {
+        let mut s = String::new();
+        self.repr_fmt(&mut s).expect("Unable to format repr display value");
+        s
+    }
+
+    fn repr_fmt(&self, f: &mut impl Write) -> fmt::Result {
+        match self {
+            Self::Ellipsis => f.write_str("Ellipsis"),
+            Self::None => f.write_str("None"),
+            Self::Bool(true) => f.write_str("True"),
+            Self::Bool(false) => f.write_str("False"),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Float(v) => {
+                let s = v.to_string();
+                f.write_str(&s)?;
+                if !s.contains('.') {
+                    f.write_str(".0")?;
+                }
+                Ok(())
+            }
+            Self::String(s) => f.write_str(&string_repr(s)),
+            Self::Bytes(b) => f.write_str(&bytes_repr(b)),
+            Self::List(l) => {
+                f.write_char('[')?;
+                let mut iter = l.iter();
+                if let Some(first) = iter.next() {
+                    first.repr_fmt(f)?;
+                    for item in iter {
+                        f.write_str(", ")?;
+                        item.repr_fmt(f)?;
+                    }
+                }
+                f.write_char(']')
+            }
+            Self::Tuple(t) => {
+                f.write_char('(')?;
+                let mut iter = t.iter();
+                if let Some(first) = iter.next() {
+                    first.repr_fmt(f)?;
+                    for item in iter {
+                        f.write_str(", ")?;
+                        item.repr_fmt(f)?;
+                    }
+                }
+                f.write_char(')')
+            }
+            Self::Dict(d) => {
+                f.write_char('{')?;
+                let mut iter = d.iter();
+                if let Some((k, v)) = iter.next() {
+                    k.repr_fmt(f)?;
+                    f.write_str(": ")?;
+                    v.repr_fmt(f)?;
+                    for (k, v) in iter {
+                        f.write_str(", ")?;
+                        k.repr_fmt(f)?;
+                        f.write_str(": ")?;
+                        v.repr_fmt(f)?;
+                    }
+                }
+                f.write_char('}')
+            }
+            Self::Exception { exc_type, arg } => {
+                let type_str: &'static str = exc_type.into();
+                write!(f, "{type_str}(")?;
+
+                if let Some(arg) = &arg {
+                    f.write_str(&string_repr(arg))?;
+                }
+                f.write_char(')')
+            }
+            Self::Repr(s) => write!(f, "Repr({})", string_repr(s)),
+        }
+    }
+
+    /// Returns `true` if this value is "truthy" according to Python's truth testing rules.
+    ///
+    /// In Python, the following values are considered falsy:
+    /// - `None` and `Ellipsis`
+    /// - `False`
+    /// - Zero numeric values (`0`, `0.0`)
+    /// - Empty sequences and collections (`""`, `b""`, `[]`, `()`, `{}`)
+    ///
+    /// All other values are truthy, including `Exception` and `Repr` variants.
+    #[must_use]
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Ellipsis => true,
+            Self::Bool(b) => *b,
+            Self::Int(i) => *i != 0,
+            Self::Float(f) => *f != 0.0,
+            Self::String(s) => !s.is_empty(),
+            Self::Bytes(b) => !b.is_empty(),
+            Self::List(l) => !l.is_empty(),
+            Self::Tuple(t) => !t.is_empty(),
+            Self::Dict(d) => !d.is_empty(),
+            Self::Exception { .. } => true,
+            Self::Repr(_) => true,
+        }
+    }
+
+    /// Returns the Python type name for this value (e.g., `"int"`, `"str"`, `"list"`).
+    ///
+    /// These are the same names returned by Python's `type(x).__name__`.
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
             Self::None => "NoneType",
+            Self::Ellipsis => "ellipsis",
             Self::Bool(_) => "bool",
             Self::Int(_) => "int",
             Self::Float(_) => "float",
-            Self::Range(_) => "range",
-            Self::InternString(_) => "str",
-            Self::InternBytes(_) => "bytes",
-            Self::Exc(e) => e.type_str(),
-            Self::Callable(c) => c.py_type(heap),
-            Self::Function(_) => "function",
-            Self::Ref(id) => heap.get(*id).py_type(heap),
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot access Dereferenced object"),
+            Self::String(_) => "str",
+            Self::Bytes(_) => "bytes",
+            Self::List(_) => "list",
+            Self::Tuple(_) => "tuple",
+            Self::Dict(_) => "dict",
+            Self::Exception { .. } => "Exception",
+            Self::Repr(_) => "repr",
         }
     }
+}
 
-    fn py_len(&self, heap: &Heap<'c, 'e>) -> Option<usize> {
+impl Hash for PyObject {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the discriminant first
+        std::mem::discriminant(self).hash(state);
+
         match self {
-            Self::InternString(s) => Some(s.len()),
-            Self::InternBytes(b) => Some(b.len()),
-            Self::Ref(id) => heap.get(*id).py_len(heap),
-            _ => None,
+            Self::Ellipsis => {}
+            Self::None => {}
+            Self::Bool(bool) => bool.hash(state),
+            Self::Int(i64) => i64.hash(state),
+            Self::Float(f64) => f64.to_bits().hash(state),
+            Self::String(string) => string.hash(state),
+            Self::Bytes(bytes) => bytes.hash(state),
+            _ => panic!("{} python values are not hashable", self.type_name()),
         }
     }
+}
 
-    fn py_eq(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> bool {
+impl PartialEq for PyObject {
+    fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Undefined, _) => false,
-            (_, Self::Undefined) => false,
-            (Self::Int(v1), Self::Int(v2)) => v1 == v2,
-            (Self::Range(v1), Self::Range(v2)) => v1 == v2,
-            (Self::Bool(v1), Self::Bool(v2)) => v1 == v2,
-            (Self::Bool(v1), Self::Int(v2)) => i64::from(*v1) == *v2,
-            (Self::Int(v1), Self::Bool(v2)) => *v1 == i64::from(*v2),
+            (Self::Ellipsis, Self::Ellipsis) => true,
             (Self::None, Self::None) => true,
-
-            (Self::InternString(s1), Self::InternString(s2)) => s1 == s2,
-            // for strings we need to account for the fact they might be either interned or not
-            (Self::InternString(s1), Self::Ref(id2)) => {
-                if let HeapData::Str(s2) = heap.get(*id2) {
-                    *s1 == s2.as_str()
-                } else {
-                    false
-                }
-            }
-            (Self::Ref(id1), Self::InternString(s2)) => {
-                if let HeapData::Str(s1) = heap.get(*id1) {
-                    s1.as_str() == *s2
-                } else {
-                    false
-                }
-            }
-
-            (Self::InternBytes(b1), Self::InternBytes(b2)) => b1 == b2,
-            // same for bytes
-            (Self::InternBytes(b1), Self::Ref(id2)) => {
-                if let HeapData::Bytes(b2) = heap.get(*id2) {
-                    *b1 == b2.as_slice()
-                } else {
-                    false
-                }
-            }
-            (Self::Ref(id1), Self::InternBytes(b2)) => {
-                if let HeapData::Bytes(b1) = heap.get(*id1) {
-                    b1.as_slice() == *b2
-                } else {
-                    false
-                }
-            }
-
-            (Self::Ref(id1), Self::Ref(id2)) => {
-                if *id1 == *id2 {
-                    return true;
-                }
-                // Need to use with_two for proper borrow management
-                heap.with_two(*id1, *id2, |heap, left, right| left.py_eq(right, heap))
-            }
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            // Use to_bits() for float comparison to be consistent with Hash
+            (Self::Float(a), Self::Float(b)) => a.to_bits() == b.to_bits(),
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::Tuple(a), Self::Tuple(b)) => a == b,
+            (Self::Dict(a), Self::Dict(b)) => a == b,
+            (
+                Self::Exception {
+                    exc_type: a_type,
+                    arg: a_arg,
+                },
+                Self::Exception {
+                    exc_type: b_type,
+                    arg: b_arg,
+                },
+            ) => a_type == b_type && a_arg == b_arg,
+            (Self::Repr(a), Self::Repr(b)) => a == b,
             _ => false,
         }
     }
-
-    #[allow(clippy::only_used_in_recursion)]
-    fn py_cmp(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> Option<Ordering> {
-        match (self, other) {
-            (Self::Int(s), Self::Int(o)) => s.partial_cmp(o),
-            (Self::Float(s), Self::Float(o)) => s.partial_cmp(o),
-            (Self::Int(s), Self::Float(o)) => (*s as f64).partial_cmp(o),
-            (Self::Float(s), Self::Int(o)) => s.partial_cmp(&(*o as f64)),
-            (Self::Bool(s), _) => Self::Int(i64::from(*s)).py_cmp(other, heap),
-            (_, Self::Bool(s)) => self.py_cmp(&Self::Int(i64::from(*s)), heap),
-            (Self::InternString(s1), Self::InternString(s2)) => s1.partial_cmp(s2),
-            (Self::InternBytes(b1), Self::InternBytes(b2)) => b1.partial_cmp(b2),
-            // Ref comparison requires heap context, not supported in PartialOrd
-            (Self::Ref(_), Self::Ref(_)) => None,
-            _ => None,
-        }
-    }
-
-    fn py_dec_ref_ids(&mut self, stack: &mut Vec<ObjectId>) {
-        if let Object::Ref(id) = self {
-            stack.push(*id);
-            // Mark as Dereferenced to prevent Drop panic
-            #[cfg(feature = "dec-ref-check")]
-            self.dec_ref_forget();
-        }
-    }
-
-    fn py_bool(&self, heap: &Heap<'c, 'e>) -> bool {
-        match self {
-            Self::Undefined => false,
-            Self::Ellipsis => true,
-            Self::None => false,
-            Self::Bool(b) => *b,
-            Self::Int(v) => *v != 0,
-            Self::Float(f) => *f != 0.0,
-            Self::Range(v) => *v != 0,
-            Self::Exc(_) => true,
-            Self::Callable(_) => true,
-            Self::Function(_) => true,
-            Self::InternString(s) => !s.is_empty(),
-            Self::InternBytes(b) => !b.is_empty(),
-            Self::Ref(id) => heap.get(*id).py_bool(heap),
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot access Dereferenced object"),
-        }
-    }
-
-    fn py_repr<'a>(&'a self, heap: &'a Heap<'c, 'e>) -> Cow<'a, str> {
-        match self {
-            Self::Undefined => "Undefined".into(),
-            Self::Ellipsis => "Ellipsis".into(),
-            Self::None => "None".into(),
-            Self::Bool(true) => "True".into(),
-            Self::Bool(false) => "False".into(),
-            Self::Int(v) => format!("{v}").into(),
-            Self::Float(v) => {
-                let s = v.to_string();
-                if s.contains('.') {
-                    s.into()
-                } else {
-                    format!("{s}.0").into()
-                }
-            }
-            Self::Range(size) => format!("0:{size}").into(),
-            Self::Exc(exc) => format!("{exc}").into(),
-            Self::Callable(c) => c.py_repr(heap),
-            Self::Function(f) => f.py_repr(),
-            Self::InternString(s) => string_repr(s).into(),
-            Self::InternBytes(b) => bytes_repr(b).into(),
-            Self::Ref(id) => heap.get(*id).py_repr(heap),
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot access Dereferenced object"),
-        }
-    }
-
-    fn py_str<'a>(&'a self, heap: &'a Heap<'c, 'e>) -> Cow<'a, str> {
-        match self {
-            Self::InternString(s) => (*s).into(),
-            Self::Ref(id) => heap.get(*id).py_str(heap),
-            _ => self.py_repr(heap),
-        }
-    }
-
-    fn py_add(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> Option<Object<'c, 'e>> {
-        match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Object::Int(v1 + v2)),
-            (Self::Float(v1), Self::Float(v2)) => Some(Object::Float(v1 + v2)),
-            (Self::Ref(id1), Self::Ref(id2)) => heap.with_two(*id1, *id2, |heap, left, right| left.py_add(right, heap)),
-            (Self::InternString(s1), Self::InternString(s2)) => {
-                let concat = format!("{s1}{s2}");
-                Some(Object::Ref(heap.allocate(HeapData::Str(concat.into()))))
-            }
-            // for strings we need to account for the fact they might be either interned or not
-            (Self::InternString(s1), Self::Ref(id2)) => {
-                if let HeapData::Str(s2) = heap.get(*id2) {
-                    let concat = format!("{}{}", s1, s2.as_str());
-                    Some(Object::Ref(heap.allocate(HeapData::Str(concat.into()))))
-                } else {
-                    None
-                }
-            }
-            (Self::Ref(id1), Self::InternString(s2)) => {
-                if let HeapData::Str(s1) = heap.get(*id1) {
-                    let concat = format!("{}{}", s1.as_str(), s2);
-                    Some(Object::Ref(heap.allocate(HeapData::Str(concat.into()))))
-                } else {
-                    None
-                }
-            }
-            // same for bytes
-            (Self::InternBytes(b1), Self::InternBytes(b2)) => {
-                let mut b = Vec::with_capacity(b1.len() + b2.len());
-                b.extend_from_slice(b1);
-                b.extend_from_slice(b2);
-                Some(Object::Ref(heap.allocate(HeapData::Bytes(b.into()))))
-            }
-            (Self::InternBytes(b1), Self::Ref(id2)) => {
-                if let HeapData::Bytes(b2) = heap.get(*id2) {
-                    let mut b = Vec::with_capacity(b1.len() + b2.len());
-                    b.extend_from_slice(b1);
-                    b.extend_from_slice(b2);
-                    Some(Object::Ref(heap.allocate(HeapData::Bytes(b.into()))))
-                } else {
-                    None
-                }
-            }
-            (Self::Ref(id1), Self::InternBytes(b2)) => {
-                if let HeapData::Bytes(b1) = heap.get(*id1) {
-                    let mut b = Vec::with_capacity(b1.len() + b2.len());
-                    b.extend_from_slice(b1);
-                    b.extend_from_slice(b2);
-                    Some(Object::Ref(heap.allocate(HeapData::Bytes(b.into()))))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn py_sub(&self, other: &Self, _heap: &mut Heap<'c, 'e>) -> Option<Self> {
-        match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Object::Int(v1 - v2)),
-            _ => None,
-        }
-    }
-
-    fn py_mod(&self, other: &Self) -> Option<Self> {
-        match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(Object::Int(v1 % v2)),
-            (Self::Float(v1), Self::Float(v2)) => Some(Object::Float(v1 % v2)),
-            (Self::Float(v1), Self::Int(v2)) => Some(Object::Float(v1 % (*v2 as f64))),
-            (Self::Int(v1), Self::Float(v2)) => Some(Object::Float((*v1 as f64) % v2)),
-            _ => None,
-        }
-    }
-
-    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
-        match (self, other) {
-            (Self::Int(v1), Self::Int(v2)) => Some(v1 % v2 == right_value),
-            (Self::Float(v1), Self::Float(v2)) => Some(v1 % v2 == right_value as f64),
-            (Self::Float(v1), Self::Int(v2)) => Some(v1 % (*v2 as f64) == right_value as f64),
-            (Self::Int(v1), Self::Float(v2)) => Some((*v1 as f64) % v2 == right_value as f64),
-            _ => None,
-        }
-    }
-
-    fn py_iadd(&mut self, other: Self, heap: &mut Heap<'c, 'e>, _self_id: Option<ObjectId>) -> bool {
-        match (&self, &other) {
-            (Self::Int(v1), Self::Int(v2)) => {
-                *self = Object::Int(*v1 + v2);
-                true
-            }
-            (Self::Float(v1), Self::Float(v2)) => {
-                *self = Object::Float(*v1 + *v2);
-                true
-            }
-            (Self::InternString(s1), Self::InternString(s2)) => {
-                let concat = format!("{s1}{s2}");
-                *self = Object::Ref(heap.allocate(HeapData::Str(concat.into())));
-                true
-            }
-            (Self::InternString(s1), Self::Ref(id2)) => {
-                if let HeapData::Str(s2) = heap.get(*id2) {
-                    let concat = format!("{}{}", s1, s2.as_str());
-                    *self = Object::Ref(heap.allocate(HeapData::Str(concat.into())));
-                    true
-                } else {
-                    false
-                }
-            }
-            (Self::Ref(id1), Self::InternString(s2)) => {
-                if let HeapData::Str(s1) = heap.get_mut(*id1) {
-                    s1.as_string_mut().push_str(s2);
-                    true
-                } else {
-                    false
-                }
-            }
-            // same for bytes
-            (Self::InternBytes(b1), Self::InternBytes(b2)) => {
-                let mut b = Vec::with_capacity(b1.len() + b2.len());
-                b.extend_from_slice(b1);
-                b.extend_from_slice(b2);
-                *self = Object::Ref(heap.allocate(HeapData::Bytes(b.into())));
-                true
-            }
-            (Self::InternBytes(b1), Self::Ref(id2)) => {
-                if let HeapData::Bytes(b2) = heap.get(*id2) {
-                    let mut b = Vec::with_capacity(b1.len() + b2.len());
-                    b.extend_from_slice(b1);
-                    b.extend_from_slice(b2);
-                    *self = Object::Ref(heap.allocate(HeapData::Bytes(b.into())));
-                    true
-                } else {
-                    false
-                }
-            }
-            (Self::Ref(id1), Self::InternBytes(b2)) => {
-                if let HeapData::Bytes(b1) = heap.get_mut(*id1) {
-                    b1.as_vec_mut().extend_from_slice(b2);
-                    true
-                } else {
-                    false
-                }
-            }
-            (Self::Ref(id), Self::Ref(_)) => {
-                heap.with_entry_mut(*id, |heap, data| data.py_iadd(other, heap, Some(*id)))
-            }
-            _ => false,
-        }
-    }
-
-    fn py_getitem(&self, key: &Self, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Self> {
-        match self {
-            Object::Ref(id) => {
-                // Need to take entry out to allow mutable heap access
-                let id = *id;
-                heap.with_entry_mut(id, |heap, data| data.py_getitem(key, heap))
-            }
-            _ => Err(ExcType::type_error_not_sub(self.py_type(heap))),
-        }
-    }
-
-    // fn py_call(&self, heap: &mut Heap<'c, 'e>, args: ArgObjects<'c, 'e>) -> Option<RunResult<'c, Self>> {
-    //     match self {
-    //         Self::Callable(c) => Some(c.call(heap, args)),
-    //         _ => None,
-    //     }
-    // }
 }
 
-impl<'c, 'e> Object<'c, 'e> {
-    /// Returns a stable, unique identifier for this object.
-    ///
-    /// Should match Python's `id()` function conceptually.
-    ///
-    /// For immediate values (Int, Float, Range, Exc, Callable), this computes a deterministic ID
-    /// based on the value's hash, avoiding heap allocation. This means `id(5) == id(5)` will
-    /// return True (unlike CPython for large integers outside the interning range).
-    ///
-    /// Singletons (None, True, False, etc.) return IDs from a dedicated tagged range.
-    /// Interned strings/bytes use their pointer + length for stable identity.
-    /// Heap-allocated objects (Ref) reuse their `ObjectId` inside the heap-tagged range.
-    pub fn id(&self) -> usize {
-        match self {
-            // Singletons have fixed tagged IDs
-            Self::Undefined => singleton_id(SingletonSlot::Undefined),
-            Self::Ellipsis => singleton_id(SingletonSlot::Ellipsis),
-            Self::None => singleton_id(SingletonSlot::None),
-            Self::Bool(b) => {
-                if *b {
-                    singleton_id(SingletonSlot::True)
-                } else {
-                    singleton_id(SingletonSlot::False)
-                }
-            }
-            Self::Function(f) => f.id(),
-            Self::InternString(s) => {
-                interned_id_from_parts(s.as_ptr() as usize, s.len(), INTERN_STR_ID_TAG, INTERN_STR_ID_MASK)
-            }
-            Self::InternBytes(b) => {
-                interned_id_from_parts(b.as_ptr() as usize, b.len(), INTERN_BYTES_ID_TAG, INTERN_BYTES_ID_MASK)
-            }
-            // Already heap-allocated, return id within a dedicated tag range
-            Self::Ref(id) => heap_tagged_id(*id),
-            // Value-based IDs for immediate types (no heap allocation!)
-            Self::Int(v) => int_value_id(*v),
-            Self::Float(v) => float_value_id(*v),
-            Self::Range(v) => range_value_id(*v),
-            Self::Exc(e) => exc_value_id(e),
-            Self::Callable(c) => callable_value_id(c),
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot get id of Dereferenced object"),
-        }
-    }
+impl Eq for PyObject {}
 
-    /// Equivalent of Python's `is` operator.
-    ///
-    /// Compares object identity by comparing their IDs.
-    pub fn is(&self, other: &Self) -> bool {
-        self.id() == other.id()
+impl AsRef<PyObject> for PyObject {
+    fn as_ref(&self) -> &PyObject {
+        self
     }
+}
 
-    /// Computes the hash value for this object, used for dict keys.
-    ///
-    /// Returns Some(hash) for hashable types (immediate values and immutable heap types).
-    /// Returns None for unhashable types (list, dict).
-    ///
-    /// For heap-allocated objects (Ref variant), this computes the hash lazily
-    /// on first use and caches it for subsequent calls.
-    pub fn py_hash_u64(&self, heap: &mut Heap<'c, 'e>) -> Option<u64> {
-        match self {
-            // Immediate values can be hashed directly
-            Self::Undefined => Some(0),
-            Self::Ellipsis => Some(1),
-            Self::None => Some(2),
-            Self::Bool(b) => {
-                let mut hasher = DefaultHasher::new();
-                b.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Int(i) => {
-                let mut hasher = DefaultHasher::new();
-                i.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Float(f) => {
-                let mut hasher = DefaultHasher::new();
-                // Hash the bit representation of float for consistency
-                f.to_bits().hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Range(r) => {
-                let mut hasher = DefaultHasher::new();
-                r.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Exc(e) => {
-                // Exceptions are rarely used as dict keys, but we provide a hash
-                // based on the exception type and argument for proper distribution
-                Some(e.py_hash())
-            }
-            Self::Callable(c) => {
-                // Builtins have a fixed identity, hash based on variant discriminant
-                let mut hasher = DefaultHasher::new();
-                std::mem::discriminant(c).hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Function(f) => {
-                let mut hasher = DefaultHasher::new();
-                // TODO, this is NOT proper hashing, we should somehow hash the function properly
-                f.name.name.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::InternString(s) => {
-                let mut hasher = DefaultHasher::new();
-                s.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::InternBytes(b) => {
-                let mut hasher = DefaultHasher::new();
-                b.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            // For heap-allocated objects, compute hash lazily and cache it
-            Self::Ref(id) => heap.get_or_compute_hash(*id),
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot access Dereferenced object"),
-        }
-    }
+/// Error returned when a `PyObject` cannot be converted to the requested Rust type.
+///
+/// This error is returned by the `TryFrom` implementations when attempting to extract
+/// a specific type from a `PyObject` that holds a different variant.
+///
+/// # Example
+///
+/// ```ignore
+/// let obj = PyObject::String("hello".to_string());
+/// let result: Result<i64, ConversionError> = (&obj).try_into();
+/// assert!(result.is_err());
+/// ```
+#[derive(Debug)]
+pub struct ConversionError {
+    /// The type name that was expected (e.g., "int", "str").
+    pub expected: &'static str,
+    /// The actual type name of the `PyObject` (e.g., "list", "NoneType").
+    pub actual: &'static str,
+}
 
-    /// TODO maybe replace with TryFrom
-    pub fn as_int(&self) -> RunResult<'static, i64> {
-        match self {
-            Self::Int(i) => Ok(*i),
-            // TODO use self.type
-            _ => exc_err_fmt!(ExcType::TypeError; "'{self:?}' object cannot be interpreted as an integer"),
-        }
-    }
-
-    /// Calls an attribute method on this object (e.g., list.append()).
-    ///
-    /// This method requires heap access to work with heap-allocated objects and
-    /// to generate accurate error messages.
-    pub fn call_attr(
-        &mut self,
-        heap: &mut Heap<'c, 'e>,
-        attr: &Attr,
-        args: ArgObjects<'c, 'e>,
-    ) -> RunResult<'c, Object<'c, 'e>> {
-        if let Self::Ref(id) = self {
-            heap.call_attr(*id, attr, args)
-        } else {
-            Err(ExcType::attribute_error(self.py_type(heap), attr))
-        }
-    }
-
-    /// Clones an object with proper heap reference counting.
-    ///
-    /// For immediate values (Int, Bool, None, etc.), this performs a simple copy.
-    /// For heap-allocated objects (Ref variant), this increments the reference count
-    /// and returns a new reference to the same heap object.
-    ///
-    /// # Important
-    /// This method MUST be used instead of the derived `Clone` implementation to ensure
-    /// proper reference counting. Using `.clone()` directly will bypass reference counting
-    /// and cause memory leaks or double-frees.
+impl ConversionError {
+    /// Creates a new `ConversionError` with the expected and actual type names.
     #[must_use]
-    pub fn clone_with_heap(&self, heap: &mut Heap<'c, 'e>) -> Self {
-        match self {
-            Self::Ref(id) => {
-                heap.inc_ref(*id);
-                Self::Ref(*id)
-            }
-            // Immediate values can be copied without heap interaction
-            other => other.clone_immediate(),
-        }
-    }
-
-    /// Drops an object, decrementing its heap reference count if applicable.
-    ///
-    /// For immediate values, this is a no-op. For heap-allocated objects (Ref variant),
-    /// this decrements the reference count and frees the object (and any children) when
-    /// the count reaches zero.
-    ///
-    /// # Important
-    /// This method MUST be called before overwriting a namespace slot or discarding
-    /// a value to prevent memory leaks.
-    ///
-    /// With `dec-ref-check` enabled, `Ref` variants are replaced with `Dereferenced` and
-    /// the original is forgotten to prevent the Drop impl from panicking. Non-Ref variants
-    /// are left unchanged since they don't trigger the Drop panic.
-    #[allow(unused_mut)]
-    pub fn drop_with_heap(mut self, heap: &mut Heap<'c, 'e>) {
-        #[cfg(feature = "dec-ref-check")]
-        {
-            let old = std::mem::replace(&mut self, Object::Dereferenced);
-            if let Self::Ref(id) = &old {
-                heap.dec_ref(*id);
-                std::mem::forget(old);
-            }
-        }
-        #[cfg(not(feature = "dec-ref-check"))]
-        if let Self::Ref(id) = self {
-            heap.dec_ref(id);
-        }
-    }
-
-    /// Internal helper for copying immediate values without heap interaction.
-    ///
-    /// This method should only be called by `clone_with_heap()` for immediate values.
-    /// Attempting to clone a Ref variant will panic.
-    fn clone_immediate(&self) -> Self {
-        match self {
-            Self::Undefined => Self::Undefined,
-            Self::Ellipsis => Self::Ellipsis,
-            Self::None => Self::None,
-            Self::Bool(b) => Self::Bool(*b),
-            Self::Int(v) => Self::Int(*v),
-            Self::Float(v) => Self::Float(*v),
-            Self::Range(v) => Self::Range(*v),
-            Self::Exc(e) => Self::Exc(e.clone()),
-            Self::Callable(c) => Self::Callable(c.clone()),
-            Self::Function(f) => Self::Function(f),
-            Self::InternString(s) => Self::InternString(s),
-            Self::InternBytes(b) => Self::InternBytes(b),
-            Self::Ref(_) => panic!("Ref clones must go through clone_with_heap to maintain refcounts"),
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot clone Dereferenced object"),
-        }
-    }
-
-    /// Creates a shallow copy of this Object without incrementing reference counts.
-    ///
-    /// IMPORTANT: For Ref variants, this copies the ObjectId but does NOT increment
-    /// the reference count. The caller MUST call `heap.inc_ref()` separately for any
-    /// Ref variants to maintain correct reference counting.
-    ///
-    /// This is useful when you need to copy Objects from a borrowed heap context
-    /// and will increment refcounts in a separate step.
-    pub(crate) fn copy_for_extend(&self) -> Self {
-        match self {
-            Self::Undefined => Self::Undefined,
-            Self::Ellipsis => Self::Ellipsis,
-            Self::None => Self::None,
-            Self::Bool(b) => Self::Bool(*b),
-            Self::Int(v) => Self::Int(*v),
-            Self::Float(v) => Self::Float(*v),
-            Self::Range(v) => Self::Range(*v),
-            Self::Exc(e) => Self::Exc(e.clone()),
-            Self::Callable(c) => Self::Callable(c.clone()),
-            Self::Function(f) => Self::Function(f),
-            Self::InternString(s) => Self::InternString(s),
-            Self::InternBytes(b) => Self::InternBytes(b),
-            Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
-            #[cfg(feature = "dec-ref-check")]
-            Self::Dereferenced => panic!("Cannot copy Dereferenced object"),
-        }
-    }
-
-    #[cfg(feature = "dec-ref-check")]
-    pub fn into_exc(self) -> SimpleException<'c> {
-        if let Self::Exc(exc) = &self {
-            // SAFETY: We're reading the exc out and then forgetting the object shell.
-            // This is safe because:
-            // 1. exc is a valid reference to the SimpleException inside object
-            // 2. We immediately forget object, so Drop won't run and won't try to
-            //    access the now-moved exc
-            // 3. It's only used with the `dref-check` feature enabled for testing
-            let exc_owned = unsafe { std::ptr::read(exc) };
-            std::mem::forget(self);
-            exc_owned
-        } else {
-            panic!("Cannot convert non-exception object into exception")
-        }
-    }
-
-    #[cfg(not(feature = "dec-ref-check"))]
-    pub fn into_exc(self) -> SimpleException<'c> {
-        if let Self::Exc(e) = self {
-            e
-        } else {
-            panic!("Cannot convert non-exception object into exception")
-        }
-    }
-
-    /// Mark as Dereferenced to prevent Drop panic
-    ///
-    /// This should be called from `py_dec_ref_ids` methods only
-    #[cfg(feature = "dec-ref-check")]
-    pub fn dec_ref_forget(&mut self) {
-        let old = std::mem::replace(self, Object::Dereferenced);
-        std::mem::forget(old);
+    pub fn new(expected: &'static str, actual: &'static str) -> Self {
+        Self { expected, actual }
     }
 }
 
-/// Attribute names for method calls on container types (list, dict).
+impl fmt::Display for ConversionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "expected {}, got {}", self.expected, self.actual)
+    }
+}
+
+impl std::error::Error for ConversionError {}
+
+/// Error returned when a `PyObject` cannot be used as an input to code execution.
 ///
-/// Uses strum `Display` derive with lowercase serialization.
-/// The `Other(String)` variant is a fallback for unknown/dynamic attribute names.
-#[derive(Debug, Clone, Display)]
-#[strum(serialize_all = "lowercase")]
-pub enum Attr {
-    Append,
-    Insert,
-    Get,
-    Keys,
-    Values,
-    Items,
-    Pop,
-    /// Fallback for unknown attribute names. Displays as the contained string.
-    #[strum(default)]
-    Other(String),
+/// Some `PyObject` variants (like `Repr`) are only valid as outputs
+/// from code execution, not as inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidInputError {
+    /// The type name of the invalid input value
+    pub type_name: &'static str,
 }
 
-impl From<String> for Attr {
-    fn from(name: String) -> Self {
-        match name.as_str() {
-            "append" => Self::Append,
-            "insert" => Self::Insert,
-            "get" => Self::Get,
-            "keys" => Self::Keys,
-            "values" => Self::Values,
-            "items" => Self::Items,
-            "pop" => Self::Pop,
-            _ => Self::Other(name),
+impl InvalidInputError {
+    /// Creates a new `InvalidInputError` for the given type name.
+    #[must_use]
+    pub fn new(type_name: &'static str) -> Self {
+        Self { type_name }
+    }
+}
+
+impl fmt::Display for InvalidInputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "'{}' is not a valid input value", self.type_name)
+    }
+}
+
+impl std::error::Error for InvalidInputError {}
+
+/// Attempts to convert a PyObject to an i64 integer.
+/// Returns an error if the object is not an Int variant.
+impl TryFrom<&PyObject> for i64 {
+    type Error = ConversionError;
+
+    fn try_from(value: &PyObject) -> Result<Self, Self::Error> {
+        match value {
+            PyObject::Int(i) => Ok(*i),
+            _ => Err(ConversionError::new("int", value.type_name())),
         }
     }
 }
 
-/// High-bit tag reserved for literal singletons (None, Ellipsis, booleans).
-const SINGLETON_ID_TAG: usize = 1usize << (usize::BITS - 1);
-/// High-bit tag reserved for interned string `id()` values.
-const INTERN_STR_ID_TAG: usize = 1usize << (usize::BITS - 2);
-/// High-bit tag reserved for interned bytes `id()` values to avoid colliding with any other space.
-const INTERN_BYTES_ID_TAG: usize = 1usize << (usize::BITS - 3);
-/// High-bit tag reserved for heap-backed `ObjectId`s.
-const HEAP_OBJECT_ID_TAG: usize = 1usize << (usize::BITS - 4);
+/// Attempts to convert a PyObject to an f64 float.
+/// Returns an error if the object is not a Float or Int variant.
+/// Int values are automatically converted to f64 to match python's behavior.
+impl TryFrom<&PyObject> for f64 {
+    type Error = ConversionError;
 
-/// Mask that keeps pointer-derived bits below the bytes tag bit.
-const INTERN_BYTES_ID_MASK: usize = INTERN_BYTES_ID_TAG - 1;
-/// Mask that keeps pointer-derived bits below the string tag bit.
-const INTERN_STR_ID_MASK: usize = INTERN_STR_ID_TAG - 1;
-/// Mask that keeps per-singleton offsets below the singleton tag bit.
-const SINGLETON_ID_MASK: usize = SINGLETON_ID_TAG - 1;
-/// Mask that keeps heap object IDs below the heap tag bit.
-const HEAP_OBJECT_ID_MASK: usize = HEAP_OBJECT_ID_TAG - 1;
-
-/// High-bit tag for Int value-based IDs (no heap allocation needed).
-const INT_ID_TAG: usize = 1usize << (usize::BITS - 5);
-/// High-bit tag for Float value-based IDs.
-const FLOAT_ID_TAG: usize = 1usize << (usize::BITS - 6);
-/// High-bit tag for Range value-based IDs.
-const RANGE_ID_TAG: usize = 1usize << (usize::BITS - 7);
-/// High-bit tag for Exc (exception) value-based IDs.
-const EXC_ID_TAG: usize = 1usize << (usize::BITS - 8);
-/// High-bit tag for Callable value-based IDs.
-const CALLABLE_ID_TAG: usize = 1usize << (usize::BITS - 9);
-
-/// Masks for value-based ID tags (keep bits below the tag bit).
-const INT_ID_MASK: usize = INT_ID_TAG - 1;
-const FLOAT_ID_MASK: usize = FLOAT_ID_TAG - 1;
-const RANGE_ID_MASK: usize = RANGE_ID_TAG - 1;
-const EXC_ID_MASK: usize = EXC_ID_TAG - 1;
-const CALLABLE_ID_MASK: usize = CALLABLE_ID_TAG - 1;
-
-/// Rotate distance used when folding slice length into the pointer identity.
-const INTERN_LEN_ROTATE: u32 = usize::BITS / 2;
-
-/// Mixes a slice pointer and its length into a deterministic identity
-/// that lives in a reserved numeric range controlled by `tag`.
-///
-/// This lets us use literal storage addresses for stable `id()` values without
-/// ever overlapping the sequential heap `ObjectId` space.
-#[inline]
-fn interned_id_from_parts(ptr: usize, len: usize, tag: usize, mask: usize) -> usize {
-    let mixed = (ptr ^ len.rotate_left(INTERN_LEN_ROTATE)) & mask;
-    tag | mixed
+    fn try_from(value: &PyObject) -> Result<Self, Self::Error> {
+        match value {
+            PyObject::Float(f) => Ok(*f),
+            PyObject::Int(i) => Ok(*i as f64),
+            _ => Err(ConversionError::new("float", value.type_name())),
+        }
+    }
 }
 
-/// Enumerates singleton literal slots so we can issue stable `id()` values without heap allocation.
-#[repr(usize)]
-#[derive(Copy, Clone)]
-enum SingletonSlot {
-    Undefined = 0,
-    Ellipsis = 1,
-    None = 2,
-    False = 3,
-    True = 4,
+/// Attempts to convert a PyObject to a String.
+/// Returns an error if the object is not a heap-allocated Str variant.
+impl TryFrom<&PyObject> for String {
+    type Error = ConversionError;
+
+    fn try_from(value: &PyObject) -> Result<Self, Self::Error> {
+        if let PyObject::String(s) = value {
+            Ok(s.clone())
+        } else {
+            Err(ConversionError::new("str", value.type_name()))
+        }
+    }
 }
 
-/// Returns the fully tagged `id()` value for the requested singleton literal.
-#[inline]
-const fn singleton_id(slot: SingletonSlot) -> usize {
-    SINGLETON_ID_TAG | ((slot as usize) & SINGLETON_ID_MASK)
-}
+/// Attempts to convert a `PyObject` to a bool.
+/// Returns an error if the object is not a True or False variant.
+/// Note: This does NOT use Python's truthiness rules (use PyObject::bool for that).
+impl TryFrom<&PyObject> for bool {
+    type Error = ConversionError;
 
-/// Converts a heap `ObjectId` into its tagged `id()` value, ensuring it never collides with other spaces.
-#[inline]
-pub fn heap_tagged_id(object_id: ObjectId) -> usize {
-    HEAP_OBJECT_ID_TAG | (object_id & HEAP_OBJECT_ID_MASK)
-}
-
-/// Computes a deterministic ID for an i64 integer value.
-/// Uses the value's hash combined with a type tag to ensure uniqueness across types.
-#[inline]
-fn int_value_id(value: i64) -> usize {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    INT_ID_TAG | (hasher.finish() as usize & INT_ID_MASK)
-}
-
-/// Computes a deterministic ID for an f64 float value.
-/// Uses the bit representation's hash for consistency (handles NaN, infinities, etc.).
-#[inline]
-fn float_value_id(value: f64) -> usize {
-    let mut hasher = DefaultHasher::new();
-    value.to_bits().hash(&mut hasher);
-    FLOAT_ID_TAG | (hasher.finish() as usize & FLOAT_ID_MASK)
-}
-
-/// Computes a deterministic ID for a Range value.
-#[inline]
-fn range_value_id(value: i64) -> usize {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    RANGE_ID_TAG | (hasher.finish() as usize & RANGE_ID_MASK)
-}
-
-/// Computes a deterministic ID for an exception based on its hash.
-#[inline]
-fn exc_value_id(exc: &SimpleException<'_>) -> usize {
-    let hash = exc.py_hash() as usize;
-    EXC_ID_TAG | (hash & EXC_ID_MASK)
-}
-
-/// Computes a deterministic ID for a Callable based on its discriminant.
-#[inline]
-fn callable_value_id(c: &Callable<'_>) -> usize {
-    let mut hasher = DefaultHasher::new();
-    std::mem::discriminant(c).hash(&mut hasher);
-    CALLABLE_ID_TAG | (hasher.finish() as usize & CALLABLE_ID_MASK)
+    fn try_from(value: &PyObject) -> Result<Self, Self::Error> {
+        match value {
+            PyObject::Bool(b) => Ok(*b),
+            _ => Err(ConversionError::new("bool", value.type_name())),
+        }
+    }
 }

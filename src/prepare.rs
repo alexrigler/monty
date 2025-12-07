@@ -141,24 +141,17 @@ impl Prepare {
                                     Some(ExprLoc::new(expr.position, call_expr))
                                 }
                                 Expr::Name(id) => {
-                                    // Handle raising a variable that holds an exception type.
-                                    // This is transformed into a call so the exception is properly instantiated.
+                                    // Handle raising a variable - could be an exception type or instance.
+                                    // The runtime will determine whether to call it (type) or raise it directly (instance).
                                     let position = id.position;
-                                    // Name will be looked up in the namespace at runtime
                                     let (resolved_id, is_new) = self.get_id(id);
                                     if is_new {
-                                        let exc: ExceptionRaise = SimpleException::new(
-                                            ExcType::NameError,
-                                            Some(resolved_id.name.to_owned().into()),
-                                        )
-                                        .into();
+                                        let exc: ExceptionRaise =
+                                            SimpleException::new(ExcType::NameError, Some(resolved_id.name.into()))
+                                                .into();
                                         return Err(exc.into());
                                     }
-                                    let call_expr = Expr::Call {
-                                        callable: Callable::Name(resolved_id),
-                                        args: ArgExprs::Zero,
-                                    };
-                                    Some(ExprLoc::new(position, call_expr))
+                                    Some(ExprLoc::new(position, Expr::Name(resolved_id)))
                                 }
                                 _ => Some(self.prepare_expression(expr)?),
                             }

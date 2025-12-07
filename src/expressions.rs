@@ -2,11 +2,10 @@ use std::fmt::{self, Write};
 
 use crate::args::ArgExprs;
 use crate::callable::Callable;
-use crate::exceptions::ExceptionRaise;
 use crate::function::Function;
-use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse::CodeRange;
+use crate::value::{Attr, Value};
 use crate::values::bytes::bytes_repr;
 use crate::values::str::string_repr;
 
@@ -81,7 +80,7 @@ pub(crate) enum Expr<'c> {
 impl fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Literal(object) => write!(f, "{object}"),
+            Self::Literal(literal) => write!(f, "{literal}"),
             Self::Callable(callable) => write!(f, "{callable}"),
             Self::Name(identifier) => f.write_str(identifier.name),
             Self::Call { callable, args } => write!(f, "{callable}{args}"),
@@ -134,7 +133,7 @@ impl Expr<'_> {
 /// Const values are intentionally detached from the runtime heap so we can keep
 /// parse-time transformations (constant folding, namespace seeding, etc.) free from
 /// reference-count semantics. Only once execution begins are these literals turned
-/// into real `Object`s that participate in the interpreter's runtime rules.
+/// into real `Value`s that participate in the interpreter's runtime rules.
 ///
 /// Note: unlike the AST `Constant` type, we store tuples only as expressions since they
 /// can't always be recorded as constants.
@@ -150,19 +149,19 @@ pub enum Literal {
 }
 
 impl Literal {
-    /// Converts the literal into its runtime `Object` counterpart.
+    /// Converts the literal into its runtime `Value` counterpart.
     ///
     /// This is the only place parse-time data crosses the boundary into runtime
     /// semantics, ensuring every literal follows the same conversion path.
-    pub fn to_object<'c>(&self) -> Object<'c, '_> {
+    pub fn to_value<'c>(&self) -> Value<'c, '_> {
         match self {
-            Self::Ellipsis => Object::Ellipsis,
-            Self::None => Object::None,
-            Self::Bool(b) => Object::Bool(*b),
-            Self::Int(v) => Object::Int(*v),
-            Self::Float(v) => Object::Float(*v),
-            Self::Str(s) => Object::InternString(s),
-            Self::Bytes(b) => Object::InternBytes(b),
+            Self::Ellipsis => Value::Ellipsis,
+            Self::None => Value::None,
+            Self::Bool(b) => Value::Bool(*b),
+            Self::Int(v) => Value::Int(*v),
+            Self::Float(v) => Value::Float(*v),
+            Self::Str(s) => Value::InternString(s),
+            Self::Bytes(b) => Value::InternBytes(b),
         }
     }
 }
@@ -239,10 +238,9 @@ pub(crate) enum Node<'c> {
     FunctionDef(Function<'c>),
 }
 
+// TODO move to run
 #[derive(Debug)]
 pub enum FrameExit<'c, 'e> {
-    Return(Object<'c, 'e>),
-    // Yield(Object),
-    #[allow(dead_code)] // Planned for future use
-    Raise(ExceptionRaise<'c>),
+    Return(Value<'c, 'e>),
+    // Yield(Value),
 }

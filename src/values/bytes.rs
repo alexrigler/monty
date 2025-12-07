@@ -5,12 +5,12 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 
-use crate::args::ArgObjects;
+use crate::args::ArgValues;
 use crate::exceptions::ExcType;
-use crate::heap::{Heap, ObjectId};
-use crate::object::{Attr, Object};
+use crate::heap::{Heap, HeapId};
 use crate::run::RunResult;
-use crate::values::PyValue;
+use crate::value::{Attr, Value};
+use crate::values::PyTrait;
 
 /// Python bytes value stored on the heap.
 ///
@@ -63,7 +63,7 @@ impl std::ops::Deref for Bytes {
     }
 }
 
-impl<'c, 'e> PyValue<'c, 'e> for Bytes {
+impl<'c, 'e> PyTrait<'c, 'e> for Bytes {
     fn py_type(&self, _heap: &Heap<'c, 'e>) -> &'static str {
         "bytes"
     }
@@ -77,8 +77,8 @@ impl<'c, 'e> PyValue<'c, 'e> for Bytes {
     }
 
     /// Bytes don't contain nested heap references.
-    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<ObjectId>) {
-        // No-op: bytes don't hold Object references
+    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {
+        // No-op: bytes don't hold Value references
     }
 
     fn py_bool(&self, _heap: &Heap<'c, 'e>) -> bool {
@@ -93,8 +93,8 @@ impl<'c, 'e> PyValue<'c, 'e> for Bytes {
         &mut self,
         heap: &mut Heap<'c, 'e>,
         attr: &Attr,
-        _args: ArgObjects<'c, 'e>,
-    ) -> RunResult<'static, Object<'c, 'e>> {
+        _args: ArgValues<'c, 'e>,
+    ) -> RunResult<'static, Value<'c, 'e>> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
     }
 }

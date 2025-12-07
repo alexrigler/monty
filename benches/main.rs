@@ -9,12 +9,12 @@ fn add_two_monty(bench: &mut Bencher) {
     let ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
 
     let r = ex.run(vec![]).unwrap();
-    let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+    let int_value: i64 = r.as_ref().try_into().unwrap();
     assert_eq!(int_value, 3);
 
     bench.iter(|| {
         let r = ex.run(vec![]).unwrap();
-        let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+        let int_value: i64 = r.as_ref().try_into().unwrap();
         black_box(int_value);
     });
 }
@@ -60,12 +60,12 @@ a['key']
     .unwrap();
 
     let r = ex.run(vec![]).unwrap();
-    let value: String = (&r.value().unwrap()).try_into().unwrap();
+    let value: String = r.as_ref().try_into().unwrap();
     assert_eq!(value, "value");
 
     bench.iter(|| {
         let r = ex.run(vec![]).unwrap();
-        let value: String = (&r.value().unwrap()).try_into().unwrap();
+        let value: String = r.as_ref().try_into().unwrap();
         black_box(value);
     });
 }
@@ -112,12 +112,12 @@ a[0]
     .unwrap();
 
     let r = ex.run(vec![]).unwrap();
-    let value: i64 = (&r.value().unwrap()).try_into().unwrap();
+    let value: i64 = r.as_ref().try_into().unwrap();
     assert_eq!(value, 42);
 
     bench.iter(|| {
         let r = ex.run(vec![]).unwrap();
-        let value: i64 = (&r.value().unwrap()).try_into().unwrap();
+        let value: i64 = r.as_ref().try_into().unwrap();
         black_box(value);
     });
 }
@@ -165,12 +165,12 @@ len(v)
 fn loop_mod_13_monty(bench: &mut Bencher) {
     let ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
     let r = ex.run(vec![]).unwrap();
-    let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+    let int_value: i64 = r.as_ref().try_into().unwrap();
     assert_eq!(int_value, 77);
 
     bench.iter(|| {
         let r = ex.run(vec![]).unwrap();
-        let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+        let int_value: i64 = r.as_ref().try_into().unwrap();
         black_box(int_value);
     });
 }
@@ -213,7 +213,7 @@ fn end_to_end_monty(bench: &mut Bencher) {
     bench.iter(|| {
         let ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
         let r = ex.run(vec![]).unwrap();
-        let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+        let int_value: i64 = r.as_ref().try_into().unwrap();
         black_box(int_value);
     });
 }

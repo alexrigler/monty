@@ -3,34 +3,34 @@ use std::fmt::Write;
 
 use indexmap::IndexMap;
 
-use crate::args::ArgObjects;
+use crate::args::ArgValues;
 use crate::exceptions::ExcType;
-use crate::heap::{Heap, HeapData, ObjectId};
-use crate::object::{Attr, Object};
+use crate::heap::{Heap, HeapData, HeapId};
 use crate::run::RunResult;
-use crate::values::PyValue;
+use crate::value::{Attr, Value};
+use crate::values::PyTrait;
 
 /// Python dict type, wrapping an IndexMap to preserve insertion order.
 ///
 /// This type provides Python dict semantics including dynamic key-value storage,
-/// reference counting for heap objects, and standard dict methods like get, keys,
+/// reference counting for heap values, and standard dict methods like get, keys,
 /// values, items, and pop.
 ///
 /// # Storage Strategy
-/// Uses `IndexMap<u64, Vec<(Object<'c, 'e>, Object<'c, 'e>)>>` to preserve insertion order (matching
+/// Uses `IndexMap<u64, Vec<(Value<'c, 'e>, Value<'c, 'e>)>>` to preserve insertion order (matching
 /// Python 3.7+ behavior). The key is the hash of the dict key. The Vec handles hash
 /// collisions by storing multiple (key, value) pairs with the same hash, allowing
 /// proper equality checking for collisions.
 ///
 /// # Reference Counting
-/// When objects are added via `set()`, their reference counts are incremented.
+/// When values are added via `set()`, their reference counts are incremented.
 /// When using `from_pairs()`, ownership is transferred without incrementing refcounts
-/// (caller must ensure objects' refcounts account for the dict's reference).
+/// (caller must ensure values' refcounts account for the dict's reference).
 #[derive(Debug, Default)]
 pub struct Dict<'c, 'e> {
     /// Maps hash -> list of (key, value) pairs with that hash
     /// The Vec handles hash collisions. IndexMap preserves insertion order.
-    map: IndexMap<u64, Vec<(Object<'c, 'e>, Object<'c, 'e>)>>,
+    map: IndexMap<u64, Vec<(Value<'c, 'e>, Value<'c, 'e>)>>,
 }
 
 impl<'c, 'e> Dict<'c, 'e> {
@@ -40,12 +40,16 @@ impl<'c, 'e> Dict<'c, 'e> {
         Self { map: IndexMap::new() }
     }
 
+    pub fn as_index_map(&self) -> &IndexMap<u64, Vec<(Value<'c, 'e>, Value<'c, 'e>)>> {
+        &self.map
+    }
+
     /// Creates a dict from a vector of (key, value) pairs.
     ///
     /// Assumes the caller is transferring ownership of all keys and values in the pairs.
     /// Does NOT increment reference counts since ownership is being transferred.
     /// Returns Err if any key is unhashable (e.g., list, dict).
-    pub fn from_pairs(pairs: Vec<(Object<'c, 'e>, Object<'c, 'e>)>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Self> {
+    pub fn from_pairs(pairs: Vec<(Value<'c, 'e>, Value<'c, 'e>)>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Self> {
         let mut dict = Self::new();
         let mut pairs_iter = pairs.into_iter();
         for (key, value) in pairs_iter.by_ref() {
@@ -64,13 +68,13 @@ impl<'c, 'e> Dict<'c, 'e> {
     /// Internal method to set a key-value pair without incrementing refcounts.
     ///
     /// Used when ownership is being transferred (e.g., from_pairs) rather than shared.
-    /// The caller must ensure the objects' refcounts already account for this dict's reference.
+    /// The caller must ensure the values' refcounts already account for this dict's reference.
     fn set_transfer_ownership(
         &mut self,
-        key: Object<'c, 'e>,
-        value: Object<'c, 'e>,
+        key: Value<'c, 'e>,
+        value: Value<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
-    ) -> RunResult<'c, Option<Object<'c, 'e>>> {
+    ) -> RunResult<'c, Option<Value<'c, 'e>>> {
         let Some(hash) = key.py_hash_u64(heap) else {
             // Key is unhashable - clean up before returning error
             let err = ExcType::type_error_unhashable(key.py_type(heap));
@@ -110,7 +114,7 @@ impl<'c, 'e> Dict<'c, 'e> {
     ///
     /// Returns Ok(Some(value)) if key exists, Ok(None) if key doesn't exist.
     /// Returns Err if key is unhashable.
-    pub fn get(&self, key: &Object<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Option<&Object<'c, 'e>>> {
+    pub fn get(&self, key: &Value<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Option<&Value<'c, 'e>>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -135,10 +139,10 @@ impl<'c, 'e> Dict<'c, 'e> {
     /// Returns Err if key is unhashable.
     pub fn set(
         &mut self,
-        key: Object<'c, 'e>,
-        value: Object<'c, 'e>,
+        key: Value<'c, 'e>,
+        value: Value<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
-    ) -> RunResult<'c, Option<Object<'c, 'e>>> {
+    ) -> RunResult<'c, Option<Value<'c, 'e>>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -172,9 +176,9 @@ impl<'c, 'e> Dict<'c, 'e> {
     /// caller assumes ownership and is responsible for managing their refcounts.
     pub fn pop(
         &mut self,
-        key: &Object<'c, 'e>,
+        key: &Value<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
-    ) -> RunResult<'c, Option<(Object<'c, 'e>, Object<'c, 'e>)>> {
+    ) -> RunResult<'c, Option<(Value<'c, 'e>, Value<'c, 'e>)>> {
         let hash = key
             .py_hash_u64(heap)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(heap)))?;
@@ -186,7 +190,7 @@ impl<'c, 'e> Dict<'c, 'e> {
                     if bucket.is_empty() {
                         self.map.shift_remove(&hash);
                     }
-                    // Don't decrement refcounts - caller now owns the objects
+                    // Don't decrement refcounts - caller now owns the values
                     return Ok(Some((old_key, old_value)));
                 }
             }
@@ -197,9 +201,9 @@ impl<'c, 'e> Dict<'c, 'e> {
     /// Returns a vector of all keys in the dict with proper reference counting.
     ///
     /// Each key's reference count is incremented since the returned vector
-    /// now holds additional references to these objects.
+    /// now holds additional references to these values.
     #[must_use]
-    pub fn keys(&self, heap: &mut Heap<'c, 'e>) -> Vec<Object<'c, 'e>> {
+    pub fn keys(&self, heap: &mut Heap<'c, 'e>) -> Vec<Value<'c, 'e>> {
         let mut result = Vec::new();
         for bucket in self.map.values() {
             for (k, _v) in bucket {
@@ -212,9 +216,9 @@ impl<'c, 'e> Dict<'c, 'e> {
     /// Returns a vector of all values in the dict with proper reference counting.
     ///
     /// Each value's reference count is incremented since the returned vector
-    /// now holds additional references to these objects.
+    /// now holds additional references to these values.
     #[must_use]
-    pub fn values(&self, heap: &mut Heap<'c, 'e>) -> Vec<Object<'c, 'e>> {
+    pub fn values(&self, heap: &mut Heap<'c, 'e>) -> Vec<Value<'c, 'e>> {
         let mut result = Vec::new();
         for bucket in self.map.values() {
             for (_k, v) in bucket {
@@ -227,9 +231,9 @@ impl<'c, 'e> Dict<'c, 'e> {
     /// Returns a vector of all (key, value) pairs in the dict with proper reference counting.
     ///
     /// Each key and value's reference count is incremented since the returned vector
-    /// now holds additional references to these objects.
+    /// now holds additional references to these values.
     #[must_use]
-    pub fn items(&self, heap: &mut Heap<'c, 'e>) -> Vec<(Object<'c, 'e>, Object<'c, 'e>)> {
+    pub fn items(&self, heap: &mut Heap<'c, 'e>) -> Vec<(Value<'c, 'e>, Value<'c, 'e>)> {
         let mut result = Vec::new();
         for bucket in self.map.values() {
             for (k, v) in bucket {
@@ -260,7 +264,7 @@ impl<'c, 'e> Dict<'c, 'e> {
     pub fn clone_with_heap(&self, heap: &mut Heap<'c, 'e>) -> Self {
         let mut new_map = IndexMap::new();
         for (hash, bucket) in &self.map {
-            let new_bucket: Vec<(Object<'c, 'e>, Object<'c, 'e>)> = bucket
+            let new_bucket: Vec<(Value<'c, 'e>, Value<'c, 'e>)> = bucket
                 .iter()
                 .map(|(k, v)| (k.clone_with_heap(heap), v.clone_with_heap(heap)))
                 .collect();
@@ -270,7 +274,7 @@ impl<'c, 'e> Dict<'c, 'e> {
     }
 }
 
-impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
+impl<'c, 'e> PyTrait<'c, 'e> for Dict<'c, 'e> {
     fn py_type(&self, _heap: &Heap<'c, 'e>) -> &'static str {
         "dict"
     }
@@ -300,15 +304,15 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
         true
     }
 
-    fn py_dec_ref_ids(&mut self, stack: &mut Vec<ObjectId>) {
+    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         for bucket in self.map.values_mut() {
             for (key, value) in bucket {
-                if let Object::Ref(id) = key {
+                if let Value::Ref(id) = key {
                     stack.push(*id);
                     #[cfg(feature = "dec-ref-check")]
                     key.dec_ref_forget();
                 }
-                if let Object::Ref(id) = value {
+                if let Value::Ref(id) = value {
                     stack.push(*id);
                     #[cfg(feature = "dec-ref-check")]
                     value.dec_ref_forget();
@@ -343,12 +347,12 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
         Cow::Owned(s)
     }
 
-    fn py_getitem(&self, key: &Object<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Object<'c, 'e>> {
+    fn py_getitem(&self, key: &Value<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, Value<'c, 'e>> {
         // Use copy_for_extend to avoid borrow conflict, then increment refcount
-        let result = self.get(key, heap)?.map(Object::copy_for_extend);
+        let result = self.get(key, heap)?.map(Value::copy_for_extend);
         match result {
             Some(value) => {
-                if let Object::Ref(id) = &value {
+                if let Value::Ref(id) = &value {
                     heap.inc_ref(*id);
                 }
                 Ok(value)
@@ -357,7 +361,7 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
         }
     }
 
-    fn py_setitem(&mut self, key: Object<'c, 'e>, value: Object<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, ()> {
+    fn py_setitem(&mut self, key: Value<'c, 'e>, value: Value<'c, 'e>, heap: &mut Heap<'c, 'e>) -> RunResult<'c, ()> {
         // Drop the old value if one was replaced
         if let Some(old_value) = self.set(key, value, heap)? {
             old_value.drop_with_heap(heap);
@@ -369,14 +373,14 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
         &mut self,
         heap: &mut Heap<'c, 'e>,
         attr: &Attr,
-        args: ArgObjects<'c, 'e>,
-    ) -> RunResult<'c, Object<'c, 'e>> {
+        args: ArgValues<'c, 'e>,
+    ) -> RunResult<'c, Value<'c, 'e>> {
         match attr {
             Attr::Get => {
                 let (key, opt_default) = args.get_one_two_args("get")?;
                 // Use copy_for_extend to avoid borrow conflict, then increment refcount
                 let result = match self.get(&key, heap) {
-                    Ok(value) => value.map(Object::copy_for_extend),
+                    Ok(value) => value.map(Value::copy_for_extend),
                     Err(err) => {
                         key.drop_with_heap(heap);
                         if let Some(default) = opt_default {
@@ -391,7 +395,7 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
 
                 match result {
                     Some(value) => {
-                        if let Object::Ref(id) = &value {
+                        if let Value::Ref(id) = &value {
                             heap.inc_ref(*id);
                         }
                         // Clean up unused default if present
@@ -405,7 +409,7 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
                         if let Some(default) = opt_default {
                             Ok(default)
                         } else {
-                            Ok(Object::None)
+                            Ok(Value::None)
                         }
                     }
                 }
@@ -415,27 +419,27 @@ impl<'c, 'e> PyValue<'c, 'e> for Dict<'c, 'e> {
                 // keys() now handles refcount incrementing
                 let keys = self.keys(heap);
                 let list_id = heap.allocate(HeapData::List(crate::values::List::new(keys)));
-                Ok(Object::Ref(list_id))
+                Ok(Value::Ref(list_id))
             }
             Attr::Values => {
                 args.check_zero_args("dict.values")?;
                 // values() now handles refcount incrementing
                 let values = self.values(heap);
                 let list_id = heap.allocate(HeapData::List(crate::values::List::new(values)));
-                Ok(Object::Ref(list_id))
+                Ok(Value::Ref(list_id))
             }
             Attr::Items => {
                 args.check_zero_args("dict.items")?;
-                // items() now handles refcount incrementing for the returned objects
+                // items() now handles refcount incrementing for the returned values
                 let items = self.items(heap);
                 // Convert to list of tuples
                 let mut tuples = Vec::new();
                 for (k, v) in items {
                     let tuple_id = heap.allocate(HeapData::Tuple(crate::values::Tuple::from_vec(vec![k, v])));
-                    tuples.push(Object::Ref(tuple_id));
+                    tuples.push(Value::Ref(tuple_id));
                 }
                 let list_id = heap.allocate(HeapData::List(crate::values::List::new(tuples)));
-                Ok(Object::Ref(list_id))
+                Ok(Value::Ref(list_id))
             }
             Attr::Pop => {
                 let (key, opt_default) = args.get_one_two_args("pop")?;

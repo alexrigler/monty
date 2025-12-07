@@ -8,13 +8,13 @@
 pub mod bytes;
 pub mod dict;
 pub mod list;
-pub mod py_value;
+pub mod py_trait;
 pub mod str;
 pub mod tuple;
 
 pub use bytes::Bytes;
 pub use dict::Dict;
 pub use list::List;
-pub use py_value::PyValue;
+pub use py_trait::PyTrait;
 pub use str::Str;
 pub use tuple::Tuple;

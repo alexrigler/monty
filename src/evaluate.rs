@@ -1,27 +1,26 @@
 use std::cmp::Ordering;
 
-use crate::args::{ArgExprs, ArgObjects};
+use crate::args::{ArgExprs, ArgValues};
 use crate::exceptions::{internal_err, ExcType, InternalRunError, SimpleException};
 use crate::expressions::{Expr, ExprLoc, Identifier};
-use crate::heap::Heap;
-use crate::object::{Attr, Object};
+use crate::heap::{Heap, HeapData};
 use crate::operators::{CmpOperator, Operator};
 use crate::run::RunResult;
-use crate::values::{Dict, List, PyValue};
-use crate::HeapData;
+use crate::value::{Attr, Value};
+use crate::values::{Dict, List, PyTrait};
 
 /// Evaluates an expression node and returns a value.
 ///
 /// `namespace` provides the current frame bindings, while `heap` is threaded so any
 /// future heap-backed objects can be created/cloned without re-threading plumbing later.
 pub(crate) fn evaluate_use<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     expr_loc: &'e ExprLoc<'c>,
-) -> RunResult<'c, Object<'c, 'e>> {
+) -> RunResult<'c, Value<'c, 'e>> {
     match &expr_loc.expr {
-        Expr::Literal(literal) => Ok(literal.to_object()),
-        Expr::Callable(callable) => Ok(callable.to_object()),
+        Expr::Literal(literal) => Ok(literal.to_value()),
+        Expr::Callable(callable) => Ok(callable.to_value()),
         Expr::Name(ident) => namespace_get_mut(namespace, ident).map(|object| object.clone_with_heap(heap)),
         Expr::Call { callable, args } => {
             let args = evaluate_args(namespace, heap, args)?;
@@ -37,20 +36,20 @@ pub(crate) fn evaluate_use<'c, 'e>(
         },
         Expr::CmpOp { left, op, right } => Ok(cmp_op(namespace, heap, left, op, right)?.into()),
         Expr::List(elements) => {
-            let objects = elements
+            let values = elements
                 .iter()
                 .map(|e| evaluate_use(namespace, heap, e))
                 .collect::<RunResult<_>>()?;
-            let object_id = heap.allocate(HeapData::List(List::new(objects)));
-            Ok(Object::Ref(object_id))
+            let heap_id = heap.allocate(HeapData::List(List::new(values)));
+            Ok(Value::Ref(heap_id))
         }
         Expr::Tuple(elements) => {
-            let objects = elements
+            let values = elements
                 .iter()
                 .map(|e| evaluate_use(namespace, heap, e))
                 .collect::<RunResult<_>>()?;
-            let object_id = heap.allocate(HeapData::Tuple(objects));
-            Ok(Object::Ref(object_id))
+            let heap_id = heap.allocate(HeapData::Tuple(values));
+            Ok(Value::Ref(heap_id))
         }
         Expr::Subscript { object, index } => {
             let obj = evaluate_use(namespace, heap, object)?;
@@ -70,13 +69,13 @@ pub(crate) fn evaluate_use<'c, 'e>(
             }
             let dict = Dict::from_pairs(eval_pairs, heap)?;
             let dict_id = heap.allocate(HeapData::Dict(dict));
-            Ok(Object::Ref(dict_id))
+            Ok(Value::Ref(dict_id))
         }
         Expr::Not(operand) => {
             let val = evaluate_use(namespace, heap, operand)?;
             let result = !val.py_bool(heap);
             val.drop_with_heap(heap);
-            Ok(Object::Bool(result))
+            Ok(Value::Bool(result))
         }
     }
 }
@@ -86,7 +85,7 @@ pub(crate) fn evaluate_use<'c, 'e>(
 /// `namespace` provides the current frame bindings, while `heap` is threaded so any
 /// future heap-backed objects can be created/cloned without re-threading plumbing later.
 pub(crate) fn evaluate_discard<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     expr_loc: &'e ExprLoc<'c>,
 ) -> RunResult<'c, ()> {
@@ -149,13 +148,13 @@ pub(crate) fn evaluate_discard<'c, 'e>(
 
 /// Specialized helper for truthiness checks; shares implementation with `evaluate`.
 pub(crate) fn evaluate_bool<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     expr_loc: &'e ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
     match &expr_loc.expr {
         Expr::CmpOp { left, op, right } => cmp_op(namespace, heap, left, op, right),
-        // Optimize `not` to avoid creating intermediate Object::Bool
+        // Optimize `not` to avoid creating intermediate Value::Bool
         Expr::Not(operand) => {
             let val = evaluate_use(namespace, heap, operand)?;
             let result = !val.py_bool(heap);
@@ -185,35 +184,35 @@ pub(crate) fn evaluate_bool<'c, 'e>(
 
 /// Evaluates a binary operator expression (`+, -, %`, etc.).
 fn eval_op<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     left: &'e ExprLoc<'c>,
     op: &Operator,
     right: &'e ExprLoc<'c>,
-) -> RunResult<'c, Object<'c, 'e>> {
-    let left_object = evaluate_use(namespace, heap, left)?;
-    let right_object = evaluate_use(namespace, heap, right)?;
-    let op_object: Option<Object> = match op {
-        Operator::Add => left_object.py_add(&right_object, heap),
-        Operator::Sub => left_object.py_sub(&right_object, heap),
-        Operator::Mod => left_object.py_mod(&right_object),
+) -> RunResult<'c, Value<'c, 'e>> {
+    let lhs = evaluate_use(namespace, heap, left)?;
+    let rhs = evaluate_use(namespace, heap, right)?;
+    let op_result: Option<Value> = match op {
+        Operator::Add => lhs.py_add(&rhs, heap),
+        Operator::Sub => lhs.py_sub(&rhs, heap),
+        Operator::Mod => lhs.py_mod(&rhs),
         _ => {
             // Drop temporary references before early return
-            left_object.drop_with_heap(heap);
-            right_object.drop_with_heap(heap);
+            lhs.drop_with_heap(heap);
+            rhs.drop_with_heap(heap);
             return internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented");
         }
     };
-    if let Some(object) = op_object {
+    if let Some(object) = op_result {
         // Drop temporary references to operands now that the operation is complete
-        left_object.drop_with_heap(heap);
-        right_object.drop_with_heap(heap);
+        lhs.drop_with_heap(heap);
+        rhs.drop_with_heap(heap);
         Ok(object)
     } else {
-        let left_type = left_object.py_type(heap);
-        let right_type = right_object.py_type(heap);
-        left_object.drop_with_heap(heap);
-        right_object.drop_with_heap(heap);
+        let left_type = lhs.py_type(heap);
+        let right_type = rhs.py_type(heap);
+        lhs.drop_with_heap(heap);
+        rhs.drop_with_heap(heap);
         SimpleException::operand_type_error(left, op, right, left_type, right_type)
     }
 }
@@ -223,11 +222,11 @@ fn eval_op<'c, 'e>(
 /// Python's `and` operator returns the first falsy operand, or the last operand if all are truthy.
 /// For example: `5 and 3` returns `3`, while `0 and 3` returns `0`.
 fn eval_and<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     left: &'e ExprLoc<'c>,
     right: &'e ExprLoc<'c>,
-) -> RunResult<'c, Object<'c, 'e>> {
+) -> RunResult<'c, Value<'c, 'e>> {
     let left_val = evaluate_use(namespace, heap, left)?;
     if left_val.py_bool(heap) {
         // Left is truthy, drop it and return right
@@ -244,11 +243,11 @@ fn eval_and<'c, 'e>(
 /// Python's `or` operator returns the first truthy operand, or the last operand if all are falsy.
 /// For example: `5 or 3` returns `5`, while `0 or 3` returns `3`.
 fn eval_or<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     left: &'e ExprLoc<'c>,
     right: &'e ExprLoc<'c>,
-) -> RunResult<'c, Object<'c, 'e>> {
+) -> RunResult<'c, Value<'c, 'e>> {
     let left_val = evaluate_use(namespace, heap, left)?;
     if left_val.py_bool(heap) {
         // Short-circuit: return left if truthy
@@ -262,86 +261,86 @@ fn eval_or<'c, 'e>(
 
 /// Evaluates comparison operators, reusing `evaluate` so heap semantics remain consistent.
 fn cmp_op<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     left: &'e ExprLoc<'c>,
     op: &CmpOperator,
     right: &'e ExprLoc<'c>,
 ) -> RunResult<'c, bool> {
-    let left_object = evaluate_use(namespace, heap, left)?;
-    let right_object = evaluate_use(namespace, heap, right)?;
+    let lhs = evaluate_use(namespace, heap, left)?;
+    let rhs = evaluate_use(namespace, heap, right)?;
 
     let result = match op {
-        CmpOperator::Eq => Some(left_object.py_eq(&right_object, heap)),
-        CmpOperator::NotEq => Some(!left_object.py_eq(&right_object, heap)),
-        CmpOperator::Gt => left_object.py_cmp(&right_object, heap).map(Ordering::is_gt),
-        CmpOperator::GtE => left_object.py_cmp(&right_object, heap).map(Ordering::is_ge),
-        CmpOperator::Lt => left_object.py_cmp(&right_object, heap).map(Ordering::is_lt),
-        CmpOperator::LtE => left_object.py_cmp(&right_object, heap).map(Ordering::is_le),
-        CmpOperator::Is => Some(left_object.is(&right_object)),
-        CmpOperator::IsNot => Some(!left_object.is(&right_object)),
-        CmpOperator::ModEq(v) => left_object.py_mod_eq(&right_object, *v),
+        CmpOperator::Eq => Some(lhs.py_eq(&rhs, heap)),
+        CmpOperator::NotEq => Some(!lhs.py_eq(&rhs, heap)),
+        CmpOperator::Gt => lhs.py_cmp(&rhs, heap).map(Ordering::is_gt),
+        CmpOperator::GtE => lhs.py_cmp(&rhs, heap).map(Ordering::is_ge),
+        CmpOperator::Lt => lhs.py_cmp(&rhs, heap).map(Ordering::is_lt),
+        CmpOperator::LtE => lhs.py_cmp(&rhs, heap).map(Ordering::is_le),
+        CmpOperator::Is => Some(lhs.is(&rhs)),
+        CmpOperator::IsNot => Some(!lhs.is(&rhs)),
+        CmpOperator::ModEq(v) => lhs.py_mod_eq(&rhs, *v),
         _ => None,
     };
 
     if let Some(v) = result {
-        left_object.drop_with_heap(heap);
-        right_object.drop_with_heap(heap);
+        lhs.drop_with_heap(heap);
+        rhs.drop_with_heap(heap);
         Ok(v)
     } else {
-        let left_type = left_object.py_type(heap);
-        let right_type = right_object.py_type(heap);
-        left_object.drop_with_heap(heap);
-        right_object.drop_with_heap(heap);
+        let left_type = lhs.py_type(heap);
+        let right_type = rhs.py_type(heap);
+        lhs.drop_with_heap(heap);
+        rhs.drop_with_heap(heap);
         SimpleException::cmp_type_error(left, op, right, left_type, right_type)
     }
 }
 
 /// Handles attribute method calls like `list.append`, again threading the heap for safety.
 fn attr_call<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
-    object_ident: &Identifier<'c>,
+    heap_ident: &Identifier<'c>,
     attr: &Attr,
     args: &'e ArgExprs<'c>,
-) -> RunResult<'c, Object<'c, 'e>> {
+) -> RunResult<'c, Value<'c, 'e>> {
     // Evaluate arguments first to avoid borrow conflicts
     let args = evaluate_args(namespace, heap, args)?;
 
-    let object = namespace_get_mut(namespace, object_ident)?;
+    let object = namespace_get_mut(namespace, heap_ident)?;
     object.call_attr(heap, attr, args)
 }
 
 /// Evaluates function arguments into an Args, optimized for common argument counts.
 fn evaluate_args<'c, 'e>(
-    namespace: &mut [Object<'c, 'e>],
+    namespace: &mut [Value<'c, 'e>],
     heap: &mut Heap<'c, 'e>,
     args_expr: &'e ArgExprs<'c>,
-) -> RunResult<'c, ArgObjects<'c, 'e>> {
+) -> RunResult<'c, ArgValues<'c, 'e>> {
     match args_expr {
-        ArgExprs::Zero => Ok(ArgObjects::Zero),
-        ArgExprs::One(arg) => evaluate_use(namespace, heap, arg).map(ArgObjects::One),
+        ArgExprs::Zero => Ok(ArgValues::Zero),
+        ArgExprs::One(arg) => evaluate_use(namespace, heap, arg).map(ArgValues::One),
         ArgExprs::Two(arg1, arg2) => {
             let arg0 = evaluate_use(namespace, heap, arg1)?;
             let arg1 = evaluate_use(namespace, heap, arg2)?;
-            Ok(ArgObjects::Two(arg0, arg1))
+            Ok(ArgValues::Two(arg0, arg1))
         }
         ArgExprs::Args(args) => args
             .iter()
             .map(|a| evaluate_use(namespace, heap, a))
             .collect::<RunResult<_>>()
-            .map(ArgObjects::Many),
+            .map(ArgValues::Many),
         _ => todo!("Implement evaluation for kwargs"),
     }
 }
 
 pub fn namespace_get_mut<'c, 'e, 'n>(
-    namespace: &'n mut [Object<'c, 'e>],
+    namespace: &'n mut [Value<'c, 'e>],
     ident: &Identifier<'c>,
-) -> RunResult<'c, &'n mut Object<'c, 'e>> {
+) -> RunResult<'c, &'n mut Value<'c, 'e>> {
     if let Some(object) = namespace.get_mut(ident.heap_id()) {
         match object {
-            Object::Undefined => {}
+            Value::Undefined => {}
             _ => return Ok(object),
         }
     }

@@ -1,3 +1,4 @@
+use crate::args::ArgValues;
 use crate::evaluate::{evaluate_bool, evaluate_discard, evaluate_use, namespace_get_mut};
 use crate::exceptions::{
     exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
@@ -5,16 +6,16 @@ use crate::exceptions::{
 use crate::expressions::{ExprLoc, FrameExit, Identifier, Node};
 use crate::function::Function;
 use crate::heap::Heap;
-use crate::object::Object;
 use crate::operators::Operator;
 use crate::parse::CodeRange;
-use crate::values::PyValue;
+use crate::value::Value;
+use crate::values::PyTrait;
 
 pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 
 #[derive(Debug)]
 pub(crate) struct RunFrame<'c, 'e> {
-    namespace: Vec<Object<'c, 'e>>,
+    namespace: Vec<Value<'c, 'e>>,
     parent: Option<StackFrame<'c>>,
     /// The name of the current frame (function name or "<module>").
     name: &'c str,
@@ -24,7 +25,7 @@ impl<'c, 'e> RunFrame<'c, 'e>
 where
     'c: 'e,
 {
-    pub fn new(namespace: Vec<Object<'c, 'e>>) -> Self {
+    pub fn new(namespace: Vec<Value<'c, 'e>>) -> Self {
         Self {
             namespace,
             parent: None,
@@ -33,7 +34,7 @@ where
     }
 
     /// Creates a new frame for function execution with captured closure cells.
-    pub fn new_for_function(namespace: Vec<Object<'c, 'e>>, name: &'c str, parent: Option<StackFrame<'c>>) -> Self {
+    pub fn new_for_function(namespace: Vec<Value<'c, 'e>>, name: &'c str, parent: Option<StackFrame<'c>>) -> Self {
         Self {
             namespace,
             parent,
@@ -45,15 +46,15 @@ where
     ///
     /// Only available when the `ref-counting` feature is enabled.
     #[cfg(feature = "ref-counting")]
-    pub fn into_namespace(self) -> Vec<Object<'c, 'e>> {
+    pub fn into_namespace(self) -> Vec<Value<'c, 'e>> {
         self.namespace
     }
 
-    /// Cleans up all objects in the namespace by properly decrementing reference counts.
+    /// Cleans up all values in the namespace by properly decrementing reference counts.
     ///
     /// This must be called before dropping the frame to properly clean up heap-allocated
-    /// objects. When the `dec-ref-check` feature is enabled, failing to call this will
-    /// cause a panic if any `Object::Ref` values are in the namespace.
+    /// values. When the `dec-ref-check` feature is enabled, failing to call this will
+    /// cause a panic if any `Value::Ref` values are in the namespace.
     #[cfg(feature = "dec-ref-check")]
     pub fn drop_with_heap(self, heap: &mut Heap<'c, 'e>) {
         for obj in self.namespace {
@@ -67,7 +68,7 @@ where
                 return Ok(leave);
             }
         }
-        Ok(FrameExit::Return(Object::None))
+        Ok(FrameExit::Return(Value::None))
     }
 
     fn execute_node(
@@ -83,7 +84,7 @@ where
                 }
             }
             Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(heap, expr)?))),
-            Node::ReturnNone => return Ok(Some(FrameExit::Return(Object::None))),
+            Node::ReturnNone => return Ok(Some(FrameExit::Return(Value::None))),
             Node::Raise(exc) => self.raise(heap, exc.as_ref())?,
             Node::Assert { test, msg } => self.assert_(heap, test, msg.as_ref())?,
             Node::Assign { target, object } => self.assign(heap, target, object)?,
@@ -103,10 +104,10 @@ where
         Ok(None)
     }
 
-    fn execute_expr(&mut self, heap: &mut Heap<'c, 'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, Object<'c, 'e>> {
+    fn execute_expr(&mut self, heap: &mut Heap<'c, 'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, Value<'c, 'e>> {
         // it seems the struct creation is optimized away, and has no cost
         match evaluate_use(&mut self.namespace, heap, expr) {
-            Ok(object) => Ok(object),
+            Ok(value) => Ok(value),
             Err(mut e) => {
                 set_name(self.name, &mut e);
                 Err(e)
@@ -116,7 +117,7 @@ where
 
     fn execute_expr_bool(&mut self, heap: &mut Heap<'c, 'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, bool> {
         match evaluate_bool(&mut self.namespace, heap, expr) {
-            Ok(object) => Ok(object),
+            Ok(value) => Ok(value),
             Err(mut e) => {
                 set_name(self.name, &mut e);
                 Err(e)
@@ -124,18 +125,34 @@ where
         }
     }
 
+    /// Executes a raise statement.
+    ///
+    /// Handles:
+    /// * Exception instance (Value::Exc) - raise directly
+    /// * Exception type (Value::Callable with ExcType) - instantiate then raise
+    /// * Anything else - TypeError
     fn raise(&mut self, heap: &mut Heap<'c, 'e>, op_exc_expr: Option<&'e ExprLoc<'c>>) -> RunResult<'c, ()> {
         if let Some(exc_expr) = op_exc_expr {
-            let object = self.execute_expr(heap, exc_expr)?;
-            // we check if the object is an exception, then destructure it into a SimpleException
-            // so we have the object available to drop later
-            if matches!(&object, Object::Exc(_)) {
-                let exc = object.into_exc();
-                Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into())
-            } else {
-                object.drop_with_heap(heap);
-                exc_err_static!(ExcType::TypeError; "exceptions must derive from BaseException")
+            let value = self.execute_expr(heap, exc_expr)?;
+            match &value {
+                Value::Exc(_) => {
+                    // Match on the reference then use into_exc() due to issues with destructuring Value
+                    let exc = value.into_exc();
+                    return Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into());
+                }
+                Value::Callable(callable) => {
+                    let result = callable.call(&mut self.namespace, heap, ArgValues::Zero)?;
+                    // Drop the original callable value
+                    if matches!(&result, Value::Exc(_)) {
+                        value.drop_with_heap(heap);
+                        let exc = result.into_exc();
+                        return Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into());
+                    }
+                }
+                _ => {}
             }
+            value.drop_with_heap(heap);
+            exc_err_static!(ExcType::TypeError; "exceptions must derive from BaseException")
         } else {
             internal_err!(InternalRunError::TodoError; "plain raise not yet supported")
         }
@@ -184,18 +201,18 @@ where
         op: &Operator,
         expr: &'e ExprLoc<'c>,
     ) -> RunResult<'c, ()> {
-        let right_object = self.execute_expr(heap, expr)?;
-        let target_object = namespace_get_mut(&mut self.namespace, target)?;
+        let rhs = self.execute_expr(heap, expr)?;
+        let target_val = namespace_get_mut(&mut self.namespace, target)?;
         let ok = match op {
-            Operator::Add => target_object.py_iadd(right_object, heap, None),
+            Operator::Add => target_val.py_iadd(rhs, heap, None),
             _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
         };
         if ok {
             Ok(())
         } else {
             // TODO this should probably move into exception.rs
-            let target_type = target_object.py_type(heap);
-            let right_type = target_object.py_type(heap);
+            let target_type = target_val.py_type(heap);
+            let right_type = target_val.py_type(heap);
             let e = exc_fmt!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
             Err(e.with_frame(self.stack_frame(&expr.position)).into())
         }
@@ -210,12 +227,13 @@ where
     ) -> RunResult<'c, ()> {
         let key = self.execute_expr(heap, index)?;
         let val = self.execute_expr(heap, value)?;
-        let target_object = namespace_get_mut(&mut self.namespace, target)?;
-        if let Object::Ref(id) = target_object {
+        let target_val = namespace_get_mut(&mut self.namespace, target)?;
+        if let Value::Ref(id) = target_val {
             let id = *id;
             heap.with_entry_mut(id, |heap, data| data.py_setitem(key, val, heap))
         } else {
-            let e = exc_fmt!(ExcType::TypeError; "'{}' object does not support item assignment", target_object.py_type(heap));
+            let e =
+                exc_fmt!(ExcType::TypeError; "'{}' object does not support item assignment", target_val.py_type(heap));
             Err(e.with_frame(self.stack_frame(&index.position)).into())
         }
     }
@@ -228,12 +246,12 @@ where
         body: &'e [Node<'c>],
         _or_else: &'e [Node<'c>],
     ) -> RunResult<'c, ()> {
-        let Object::Range(range_size) = self.execute_expr(heap, iter)? else {
+        let Value::Range(range_size) = self.execute_expr(heap, iter)? else {
             return internal_err!(InternalRunError::TodoError; "`for` iter must be a range");
         };
 
-        for object in 0i64..range_size {
-            self.namespace[target.heap_id()] = Object::Int(object);
+        for value in 0i64..range_size {
+            self.namespace[target.heap_id()] = Value::Int(value);
             self.execute(heap, body)?;
         }
         Ok(())
@@ -255,7 +273,7 @@ where
     }
 
     fn define_function(&mut self, heap: &mut Heap<'c, 'e>, function: &'e Function<'c>) {
-        let old_value = std::mem::replace(&mut self.namespace[function.name.heap_id()], Object::Function(function));
+        let old_value = std::mem::replace(&mut self.namespace[function.name.heap_id()], Value::Function(function));
         // Drop the old value properly (dec_ref for Refs, no-op for others)
         old_value.drop_with_heap(heap);
     }

@@ -4,12 +4,12 @@
 /// operations like length and equality comparison.
 use std::borrow::Cow;
 
-use crate::args::ArgObjects;
+use crate::args::ArgValues;
 use crate::exceptions::ExcType;
-use crate::heap::{Heap, HeapData, ObjectId};
-use crate::object::{Attr, Object};
+use crate::heap::{Heap, HeapData, HeapId};
 use crate::run::RunResult;
-use crate::values::PyValue;
+use crate::value::{Attr, Value};
+use crate::values::PyTrait;
 
 /// Python string value stored on the heap.
 ///
@@ -63,7 +63,7 @@ impl std::ops::Deref for Str {
     }
 }
 
-impl<'c, 'e> PyValue<'c, 'e> for Str {
+impl<'c, 'e> PyTrait<'c, 'e> for Str {
     fn py_type(&self, _heap: &Heap<'c, 'e>) -> &'static str {
         "str"
     }
@@ -77,8 +77,8 @@ impl<'c, 'e> PyValue<'c, 'e> for Str {
     }
 
     /// Strings don't contain nested heap references.
-    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<ObjectId>) {
-        // No-op: strings don't hold Object references
+    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {
+        // No-op: strings don't hold Value references
     }
 
     fn py_bool(&self, _heap: &Heap<'c, 'e>) -> bool {
@@ -93,15 +93,15 @@ impl<'c, 'e> PyValue<'c, 'e> for Str {
         self.0.as_str().into()
     }
 
-    fn py_add(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> Option<Object<'c, 'e>> {
+    fn py_add(&self, other: &Self, heap: &mut Heap<'c, 'e>) -> Option<Value<'c, 'e>> {
         let result = format!("{}{}", self.0, other.0);
         let id = heap.allocate(HeapData::Str(result.into()));
-        Some(Object::Ref(id))
+        Some(Value::Ref(id))
     }
 
-    fn py_iadd(&mut self, other: Object<'c, 'e>, heap: &mut Heap<'c, 'e>, self_id: Option<ObjectId>) -> bool {
+    fn py_iadd(&mut self, other: Value<'c, 'e>, heap: &mut Heap<'c, 'e>, self_id: Option<HeapId>) -> bool {
         match other {
-            Object::Ref(other_id) => {
+            Value::Ref(other_id) => {
                 if Some(other_id) == self_id {
                     let rhs = self.0.clone();
                     self.0.push_str(&rhs);
@@ -121,8 +121,8 @@ impl<'c, 'e> PyValue<'c, 'e> for Str {
         &mut self,
         heap: &mut Heap<'c, 'e>,
         attr: &Attr,
-        _args: ArgObjects<'c, 'e>,
-    ) -> RunResult<'c, Object<'c, 'e>> {
+        _args: ArgValues<'c, 'e>,
+    ) -> RunResult<'c, Value<'c, 'e>> {
         Err(ExcType::attribute_error(self.py_type(heap), attr))
     }
 }
