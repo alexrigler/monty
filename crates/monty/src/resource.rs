@@ -2,7 +2,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::exception_private::{ExceptionRaise, RawStackFrame, RunError, SimpleException};
-use crate::ExcType;
+use crate::{ExcType, MontyException};
 
 /// Error returned when a resource limit is exceeded during execution.
 ///
@@ -18,6 +18,8 @@ pub enum ResourceError {
     Memory { limit: usize, used: usize },
     /// Maximum recursion depth exceeded.
     Recursion { limit: usize, depth: usize },
+    /// Any other error, e.g. when propagating a python exception
+    Exception(MontyException),
 }
 
 impl fmt::Display for ResourceError {
@@ -34,6 +36,9 @@ impl fmt::Display for ResourceError {
             }
             Self::Recursion { .. } => {
                 write!(f, "maximum recursion depth exceeded")
+            }
+            Self::Exception(exc) => {
+                write!(f, "{exc}")
             }
         }
     }
@@ -54,19 +59,23 @@ impl ResourceError {
         let (exc_type, msg) = match self {
             Self::Allocation { limit, count } => (
                 ExcType::MemoryError,
-                format!("allocation limit exceeded: {count} > {limit}"),
+                Some(format!("allocation limit exceeded: {count} > {limit}")),
             ),
             Self::Memory { limit, used } => (
                 ExcType::MemoryError,
-                format!("memory limit exceeded: {used} bytes > {limit} bytes"),
+                Some(format!("memory limit exceeded: {used} bytes > {limit} bytes")),
             ),
             Self::Time { limit, elapsed } => (
                 ExcType::TimeoutError,
-                format!("time limit exceeded: {elapsed:?} > {limit:?}"),
+                Some(format!("time limit exceeded: {elapsed:?} > {limit:?}")),
             ),
-            Self::Recursion { .. } => (ExcType::RecursionError, "maximum recursion depth exceeded".to_string()),
+            Self::Recursion { .. } => (
+                ExcType::RecursionError,
+                Some("maximum recursion depth exceeded".to_string()),
+            ),
+            Self::Exception(exc) => (exc.exc_type(), exc.into_message()),
         };
-        let exc = SimpleException::new(exc_type, Some(msg));
+        let exc = SimpleException::new(exc_type, msg);
         match frame {
             Some(f) => exc.with_frame(f),
             None => exc.into(),
@@ -108,7 +117,7 @@ pub trait ResourceTracker: fmt::Debug {
     ///
     /// Returns `Ok(())` if within time limit, or `Err(ResourceError::Time)`
     /// if the limit is exceeded.
-    fn check_time(&self) -> Result<(), ResourceError>;
+    fn check_time(&mut self) -> Result<(), ResourceError>;
 
     /// Returns true if garbage collection should run.
     ///
@@ -164,7 +173,7 @@ impl ResourceTracker for NoLimitTracker {
     fn on_free(&mut self, _: impl FnOnce() -> usize) {}
 
     #[inline]
-    fn check_time(&self) -> Result<(), ResourceError> {
+    fn check_time(&mut self) -> Result<(), ResourceError> {
         Ok(())
     }
 
@@ -355,7 +364,7 @@ impl ResourceTracker for LimitedTracker {
         self.current_memory = self.current_memory.saturating_sub(get_size());
     }
 
-    fn check_time(&self) -> Result<(), ResourceError> {
+    fn check_time(&mut self) -> Result<(), ResourceError> {
         if let Some(max) = self.limits.max_duration {
             let elapsed = self.start_time.elapsed();
             if elapsed > max {

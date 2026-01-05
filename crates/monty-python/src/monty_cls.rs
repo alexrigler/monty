@@ -13,7 +13,7 @@ use pyo3::{prelude::*, IntoPyObjectExt};
 use crate::convert::{monty_to_py, py_to_monty};
 use crate::exceptions::{exc_monty_to_py, exc_py_to_monty};
 use crate::external::ExternalFunctionRegistry;
-use crate::limits::PyResourceLimits;
+use crate::limits::{extract_limits, PySignalTracker};
 
 /// A sandboxed Python interpreter instance.
 ///
@@ -84,53 +84,45 @@ impl PyMonty {
         &self,
         py: Python<'_>,
         inputs: Option<&Bound<'_, PyDict>>,
-        limits: Option<&PyResourceLimits>,
+        limits: Option<&Bound<'_, PyDict>>,
         external_functions: Option<&Bound<'_, PyDict>>,
         print_callback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         // Extract input values in the order they were declared
         let input_values = self.extract_input_values(inputs)?;
 
-        /// if there are no external functions, run the code without a snapshotting for better performance
-        macro_rules! run_code {
-            ($resource_tracker:expr, $print_output:expr) => {{
-                if self.external_function_names.is_empty() {
-                    match self
-                        .runner
-                        .run(input_values, $resource_tracker, &mut $print_output)
-                    {
-                        Ok(v) => monty_to_py(py, &v),
-                        Err(err) => Err(exc_monty_to_py(err)),
-                    }
-                } else {
-                    // Clone the runner since start() consumes it - allows reuse of the parsed code
-                    let progress = self
-                        .runner
-                        .clone()
-                        .start(input_values, $resource_tracker, &mut $print_output)
-                        .map_err(exc_monty_to_py)?;
-                    execute_progress(py, progress, external_functions, &mut $print_output)
-                }
-            }};
-        }
-
-        // separate code paths due to generics
+        // Use SignalCheckingTracker when limits are provided, NoLimitTracker otherwise
         match (limits, print_callback) {
             (Some(limits), Some(callback)) => {
-                run_code!(
-                    LimitedTracker::new(limits.to_monty_limits()),
-                    CallbackStringPrint(callback)
+                let inner_tracker = LimitedTracker::new(extract_limits(limits)?);
+                let tracker = PySignalTracker::new(inner_tracker);
+                self.run_with_tracker(
+                    py,
+                    input_values,
+                    tracker,
+                    external_functions,
+                    CallbackStringPrint(callback),
                 )
             }
             (Some(limits), None) => {
-                run_code!(LimitedTracker::new(limits.to_monty_limits()), StdPrint)
+                let inner_tracker = LimitedTracker::new(extract_limits(limits)?);
+                let tracker = PySignalTracker::new(inner_tracker);
+                self.run_with_tracker(py, input_values, tracker, external_functions, StdPrint)
             }
-            (None, Some(callback)) => {
-                run_code!(NoLimitTracker::default(), CallbackStringPrint(callback))
-            }
-            (None, None) => {
-                run_code!(NoLimitTracker::default(), StdPrint)
-            }
+            (None, Some(callback)) => self.run_with_tracker(
+                py,
+                input_values,
+                PySignalTracker::new(NoLimitTracker::default()),
+                external_functions,
+                CallbackStringPrint(callback),
+            ),
+            (None, None) => self.run_with_tracker(
+                py,
+                input_values,
+                PySignalTracker::new(NoLimitTracker::default()),
+                external_functions,
+                StdPrint,
+            ),
         }
     }
 
@@ -139,7 +131,7 @@ impl PyMonty {
         &self,
         py: Python<'py>,
         inputs: Option<&Bound<'py, PyDict>>,
-        limits: Option<&PyResourceLimits>,
+        limits: Option<&Bound<'py, PyDict>>,
         print_callback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         // Extract input values in the order they were declared
@@ -158,11 +150,11 @@ impl PyMonty {
         // separate code paths due to generics
         let progress = match (limits, print_callback) {
             (Some(limits), Some(callback)) => EitherProgress::Limited(start!(
-                LimitedTracker::new(limits.to_monty_limits()),
+                LimitedTracker::new(extract_limits(limits)?),
                 CallbackStringPrint(callback)
             )),
             (Some(limits), None) => {
-                EitherProgress::Limited(start!(LimitedTracker::new(limits.to_monty_limits()), StdPrint))
+                EitherProgress::Limited(start!(LimitedTracker::new(extract_limits(limits)?), StdPrint))
             }
             (None, Some(callback)) => {
                 EitherProgress::NoLimit(start!(NoLimitTracker::default(), CallbackStringPrint(callback)))
@@ -267,6 +259,31 @@ impl PyMonty {
                 py_to_monty(&value)
             })
             .collect::<PyResult<_>>()
+    }
+
+    /// Runs code with a generic tracker.
+    fn run_with_tracker(
+        &self,
+        py: Python<'_>,
+        input_values: Vec<MontyObject>,
+        tracker: impl ResourceTracker,
+        external_functions: Option<&Bound<'_, PyDict>>,
+        mut print_output: impl PrintWriter,
+    ) -> PyResult<Py<PyAny>> {
+        if self.external_function_names.is_empty() {
+            match self.runner.run(input_values, tracker, &mut print_output) {
+                Ok(v) => monty_to_py(py, &v),
+                Err(err) => Err(exc_monty_to_py(err)),
+            }
+        } else {
+            // Clone the runner since start() consumes it - allows reuse of the parsed code
+            let progress = self
+                .runner
+                .clone()
+                .start(input_values, tracker, &mut print_output)
+                .map_err(exc_monty_to_py)?;
+            execute_progress(py, progress, external_functions, &mut print_output)
+        }
     }
 }
 
@@ -513,7 +530,7 @@ impl PyMontyComplete {
 
 /// Executes the `RunProgress` loop, handling external function calls.
 ///
-/// Uses a generic type to handle both `NoLimitTracker` and `LimitedTracker`.
+/// Checks for pending Python signals (e.g., Ctrl+C) after execution completes.
 fn execute_progress(
     py: Python<'_>,
     mut progress: RunProgress<impl ResourceTracker>,
@@ -522,9 +539,7 @@ fn execute_progress(
 ) -> PyResult<Py<PyAny>> {
     loop {
         match progress {
-            RunProgress::Complete(result) => {
-                return monty_to_py(py, &result);
-            }
+            RunProgress::Complete(result) => return monty_to_py(py, &result),
             RunProgress::FunctionCall {
                 function_name,
                 args,
