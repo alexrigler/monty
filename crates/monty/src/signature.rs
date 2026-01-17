@@ -43,44 +43,73 @@ use crate::{
 /// The `*args` slot is only present if `var_args` is Some.
 /// The `**kwargs` slot is only present if `var_kwargs` is Some.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Signature {
+pub(crate) struct Signature {
     /// Positional-only parameters, e.g. `a, b` in `def f(a, b, /): ...`
     ///
     /// These can only be passed by position, not by keyword.
-    pub pos_args: Option<Vec<StringId>>,
+    pos_args: Option<Vec<StringId>>,
 
     /// Number of positional-only parameters with defaults (from the end).
-    pub pos_defaults_count: usize,
+    pos_defaults_count: usize,
 
     /// Positional-or-keyword parameters, e.g. `a, b` in `def f(a, b): ...`
     ///
     /// These can be passed either by position or by keyword.
-    pub args: Option<Vec<StringId>>,
+    args: Option<Vec<StringId>>,
 
     /// Number of positional-or-keyword parameters with defaults (from the end).
-    pub arg_defaults_count: usize,
+    arg_defaults_count: usize,
 
     /// Variable positional parameter name, e.g. `args` in `def f(*args): ...`
     ///
     /// Collects excess positional arguments into a tuple.
-    pub var_args: Option<StringId>,
+    var_args: Option<StringId>,
 
     /// Keyword-only parameters, e.g. `c` in `def f(*, c): ...` or `def f(*args, c): ...`
     ///
     /// These can only be passed by keyword, not by position.
-    pub kwargs: Option<Vec<StringId>>,
+    kwargs: Option<Vec<StringId>>,
 
     /// Mapping from each keyword-only parameter to its default index (if any).
     ///
     /// Each entry corresponds to the same index in `kwargs`. A value of `Some(i)`
     /// points into the kwarg section of the defaults array, while `None` means
     /// the parameter is required.
-    pub kwarg_default_map: Option<Vec<Option<usize>>>,
+    kwarg_default_map: Option<Vec<Option<usize>>>,
 
     /// Variable keyword parameter name, e.g. `kwargs` in `def f(**kwargs): ...`
     ///
     /// Collects excess keyword arguments into a dict.
-    pub var_kwargs: Option<StringId>,
+    var_kwargs: Option<StringId>,
+
+    /// How simple the signature is, used for fast path when binding
+    bind_mode: BindMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum BindMode {
+    /// If this is a simple signature (no defaults, no *args/**kwargs).
+    ///
+    /// Simple signatures can use a fast path for argument binding that avoids
+    /// the full binding algorithm overhead. A simple signature has:
+    /// - No positional-only parameters
+    /// - No defaults for any parameters
+    /// - No *args or **kwargs
+    /// - No keyword-only parameters
+    #[default]
+    Simple,
+    /// If this signature has only positional-or-keyword params with defaults.
+    ///
+    /// This identifies the common pattern `def f(a, b=1, c=2)` where:
+    /// - No positional-only parameters
+    /// - No *args or **kwargs
+    /// - No keyword-only parameters
+    /// - Has some default values
+    ///
+    /// These signatures can use a simplified binding that just fills positional
+    /// args and applies defaults without the full algorithm overhead.
+    SimpleWithDefaults,
+    Complex,
 }
 
 impl Signature {
@@ -106,108 +135,39 @@ impl Signature {
         kwarg_default_map: Vec<Option<usize>>,
         var_kwargs: Option<StringId>,
     ) -> Self {
+        let pos_args = if pos_args.is_empty() { None } else { Some(pos_args) };
         let has_kwonly = !kwargs.is_empty();
+        let kwargs = if has_kwonly { Some(kwargs) } else { None };
+
+        let bind_mode = if pos_args.is_none()
+            && pos_defaults_count == 0
+            && arg_defaults_count == 0
+            && var_args.is_none()
+            && kwargs.is_none()
+            && var_kwargs.is_none()
+        {
+            BindMode::Simple
+        } else if pos_args.is_none()
+            && var_args.is_none()
+            && kwargs.is_none()
+            && var_kwargs.is_none()
+            && arg_defaults_count > 0
+        {
+            BindMode::SimpleWithDefaults
+        } else {
+            BindMode::Complex
+        };
+
         Self {
-            pos_args: if pos_args.is_empty() { None } else { Some(pos_args) },
+            pos_args,
             pos_defaults_count,
             args: if args.is_empty() { None } else { Some(args) },
             arg_defaults_count,
             var_args,
-            kwargs: if has_kwonly { Some(kwargs) } else { None },
+            kwargs,
             kwarg_default_map: if has_kwonly { Some(kwarg_default_map) } else { None },
             var_kwargs,
-        }
-    }
-
-    /// Returns true if this is a simple signature (no defaults, no *args/**kwargs).
-    ///
-    /// Simple signatures can use a fast path for argument binding that avoids
-    /// the full binding algorithm overhead. A simple signature has:
-    /// - No positional-only parameters
-    /// - No defaults for any parameters
-    /// - No *args or **kwargs
-    /// - No keyword-only parameters
-    pub fn is_simple(&self) -> bool {
-        self.pos_args.is_none()
-            && self.pos_defaults_count == 0
-            && self.arg_defaults_count == 0
-            && self.var_args.is_none()
-            && self.kwargs.is_none()
-            && self.var_kwargs.is_none()
-    }
-
-    /// Returns the total number of default values across all parameter groups.
-    pub fn total_defaults_count(&self) -> usize {
-        self.pos_defaults_count + self.arg_defaults_count + self.kwarg_defaults_count()
-    }
-
-    fn kwarg_defaults_count(&self) -> usize {
-        self.kwarg_default_map
-            .as_deref()
-            .map(|v| v.iter().filter(|&x| x.is_some()).count())
-            .unwrap_or_default()
-    }
-
-    /// Returns the number of positional-only parameters.
-    pub fn pos_arg_count(&self) -> usize {
-        self.pos_args.as_ref().map_or(0, Vec::len)
-    }
-
-    /// Returns the number of positional-or-keyword parameters.
-    pub fn arg_count(&self) -> usize {
-        self.args.as_ref().map_or(0, Vec::len)
-    }
-
-    /// Returns the number of keyword-only parameters.
-    pub fn kwarg_count(&self) -> usize {
-        self.kwargs.as_ref().map_or(0, Vec::len)
-    }
-
-    /// Returns the total number of named parameters (excluding *args/**kwargs slots).
-    ///
-    /// This is `pos_args.len() + args.len() + kwargs.len()`.
-    pub fn param_count(&self) -> usize {
-        self.pos_arg_count() + self.arg_count() + self.kwarg_count()
-    }
-
-    /// Returns the total number of namespace slots needed for parameters.
-    ///
-    /// This includes slots for:
-    /// - All named parameters (pos_args + args + kwargs)
-    /// - The *args tuple (if var_args is Some)
-    /// - The **kwargs dict (if var_kwargs is Some)
-    pub fn total_slots(&self) -> usize {
-        let mut slots = self.param_count();
-        if self.var_args.is_some() {
-            slots += 1;
-        }
-        if self.var_kwargs.is_some() {
-            slots += 1;
-        }
-        slots
-    }
-
-    /// Returns an iterator over all parameter names in namespace slot order.
-    ///
-    /// Order: pos_args, args, var_args (if present), kwargs, var_kwargs (if present)
-    pub fn param_names(&self) -> impl Iterator<Item = StringId> + '_ {
-        let pos_args = self.pos_args.iter().flat_map(|v| v.iter().copied());
-        let args = self.args.iter().flat_map(|v| v.iter().copied());
-        let var_args = self.var_args.iter().copied();
-        let kwargs = self.kwargs.iter().flat_map(|v| v.iter().copied());
-        let var_kwargs = self.var_kwargs.iter().copied();
-
-        pos_args.chain(args).chain(var_args).chain(kwargs).chain(var_kwargs)
-    }
-
-    /// Returns the maximum number of positional arguments accepted.
-    ///
-    /// Returns None if *args is present (unlimited positional args).
-    pub fn max_positional_count(&self) -> Option<usize> {
-        if self.var_args.is_some() {
-            None
-        } else {
-            Some(self.pos_arg_count() + self.arg_count())
+            bind_mode,
         }
     }
 
@@ -247,14 +207,13 @@ impl Signature {
         func_name: Identifier,
         namespace: &mut Vec<Value>,
     ) -> RunResult<()> {
-        if self.is_simple() {
-            // Injects arguments into a namespace for simple function signatures.
-            //
-            // This is the fast path for functions with only positional parameters and no
-            // defaults, *args, kwargs or **kwargs.
-            //
-            // We do a weird thing here where we return Option<ArgsValues> so we can consume args, but
-            // still use them again in the non-simple case.
+        // Fast path for simple signatures (no defaults, no special params) and
+        // signatures with only positional-or-keyword params and defaults.
+        // This avoids the full binding algorithm overhead for common cases.
+
+        if matches!(self.bind_mode, BindMode::Simple | BindMode::SimpleWithDefaults) {
+            // Try to consume args directly into namespace without the full algorithm.
+            // Returns Some(args) if kwargs were passed (need full algorithm).
             let opt_args = match args {
                 ArgValues::Empty => None,
                 ArgValues::One(a) => {
@@ -275,25 +234,42 @@ impl Signature {
                 }
                 args => Some(args),
             };
+
             if let Some(continue_args) = opt_args {
+                // Kwargs were passed - need full algorithm
                 args = continue_args;
             } else {
                 let actual_count = namespace.len();
-                return if actual_count == self.param_count() {
-                    Ok(())
-                } else {
-                    // Clean up bound values before returning error
-                    for val in namespace.drain(..) {
-                        val.drop_with_heap(heap);
+                let param_count = self.param_count();
+
+                if actual_count == param_count {
+                    // Exact match - no defaults needed
+                    return Ok(());
+                } else if self.bind_mode == BindMode::SimpleWithDefaults {
+                    let required = self.required_positional_count();
+                    if actual_count >= required && actual_count < param_count {
+                        // Apply defaults for remaining parameters
+                        // Defaults are stored at the end of the defaults array for pos-or-kw params
+                        let defaults_needed = param_count - actual_count;
+                        let defaults_start = self.arg_defaults_count - defaults_needed;
+                        for i in 0..defaults_needed {
+                            namespace.push(defaults[defaults_start + i].clone_with_heap(heap));
+                        }
+                        return Ok(());
                     }
-                    self.wrong_arg_count_error(actual_count, interns, func_name)
-                };
+                }
+
+                // Wrong number of arguments - clean up and return error
+                for val in namespace.drain(..) {
+                    val.drop_with_heap(heap);
+                }
+                return self.wrong_arg_count_error(actual_count, interns, func_name);
             }
         }
         // Full binding algorithm for complex signatures or kwargs
 
-        // Split args into positional and keyword components
-        let (positional_args, keyword_args) = args.split();
+        // Split args into positional iterator and keyword components without allocating
+        let (mut pos_iter, keyword_args) = args.into_parts();
 
         // Calculate how many positional params we have
         let pos_param_count = self.pos_arg_count();
@@ -301,12 +277,17 @@ impl Signature {
         let total_positional_params = pos_param_count + arg_param_count;
 
         // Check positional argument count against maximum
-        let positional_count = positional_args.len();
+        let positional_count = pos_iter.len();
         let kwonly_given = keyword_args.len();
         if let Some(max) = self.max_positional_count()
             && positional_count > max
         {
             let func = interns.get_str(func_name.name_id);
+            // Must clean up iterator and kwargs before returning error
+            for value in pos_iter {
+                value.drop_with_heap(heap);
+            }
+            keyword_args.drop_with_heap(heap);
             return Err(ExcType::type_error_too_many_positional(
                 func,
                 max,
@@ -318,31 +299,36 @@ impl Signature {
         // Initialize result namespace with Undefined values for all slots
         // Layout: [pos_args][args][*args?][kwargs][**kwargs?]
         let var_args_offset = usize::from(self.var_args.is_some());
-        let all_named_slots = total_positional_params + self.kwarg_count();
         for _ in 0..self.total_slots() {
             namespace.push(Value::Undefined);
         }
 
         // Track which parameters have been bound (for duplicate detection)
+        // Uses a u64 bitmap - supports up to 64 named parameters which is sufficient
+        // for any reasonable Python function (Python itself has practical limits).
         // Note: this tracks only named params, not *args/**kwargs slots
-        let mut bound_params = vec![false; all_named_slots];
+        let mut bound_params: u64 = 0;
 
         // 1. Bind positional args to pos_args, then args
-        let mut pos_iter = positional_args.into_iter();
 
         // Bind to pos_args
-        for i in 0..pos_param_count {
+        for (i, slot) in namespace.iter_mut().enumerate().take(pos_param_count) {
             if let Some(val) = pos_iter.next() {
-                namespace[i] = val;
-                bound_params[i] = true;
+                *slot = val;
+                bound_params |= 1 << i;
             }
         }
 
         // Bind to args
-        for i in pos_param_count..total_positional_params {
+        for (i, slot) in namespace
+            .iter_mut()
+            .enumerate()
+            .take(total_positional_params)
+            .skip(pos_param_count)
+        {
             if let Some(val) = pos_iter.next() {
-                namespace[i] = val;
-                bound_params[i] = true;
+                *slot = val;
+                bound_params |= 1 << i;
             }
         }
 
@@ -395,7 +381,7 @@ impl Signature {
                     .find(|&(_, param_id)| keyword_name.matches(*param_id, interns));
                 if let Some((i, &param_id)) = matching_param {
                     let idx = pos_param_count + i;
-                    if bound_params[idx] {
+                    if (bound_params & (1 << idx)) != 0 {
                         let func = interns.get_str(func_name.name_id);
                         let param = interns.get_str(param_id);
                         if let Some(v) = remaining_value.take() {
@@ -410,7 +396,7 @@ impl Signature {
                     if let Some(v) = remaining_value.take() {
                         namespace[idx] = v;
                     }
-                    bound_params[idx] = true;
+                    bound_params |= 1 << idx;
                     if let Some(key) = key_value.take() {
                         key.drop_with_heap(heap);
                     }
@@ -426,7 +412,7 @@ impl Signature {
                         // Skip past *args slot if present
                         let ns_idx = total_positional_params + var_args_offset + i;
                         let idx = total_positional_params + i;
-                        if bound_params[idx] {
+                        if (bound_params & (1 << idx)) != 0 {
                             let func = interns.get_str(func_name.name_id);
                             let param = interns.get_str(param_id);
                             if let Some(v) = remaining_value.take() {
@@ -442,7 +428,7 @@ impl Signature {
                         if let Some(v) = remaining_value.take() {
                             namespace[ns_idx] = v;
                         }
-                        bound_params[idx] = true;
+                        bound_params |= 1 << idx;
                         if let Some(bound_key) = key_value.take() {
                             bound_key.drop_with_heap(heap);
                         }
@@ -483,9 +469,9 @@ impl Signature {
         if self.pos_defaults_count > 0 {
             let first_optional = pos_param_count - self.pos_defaults_count;
             for i in first_optional..pos_param_count {
-                if !bound_params[i] {
+                if (bound_params & (1 << i)) == 0 {
                     namespace[i] = defaults[default_idx + (i - first_optional)].clone_with_heap(heap);
-                    bound_params[i] = true;
+                    bound_params |= 1 << i;
                 }
             }
         }
@@ -496,9 +482,9 @@ impl Signature {
             let first_optional = arg_param_count - self.arg_defaults_count;
             for i in first_optional..arg_param_count {
                 let ns_idx = pos_param_count + i;
-                if !bound_params[ns_idx] {
+                if (bound_params & (1 << ns_idx)) == 0 {
                     namespace[ns_idx] = defaults[default_idx + (i - first_optional)].clone_with_heap(heap);
-                    bound_params[ns_idx] = true;
+                    bound_params |= 1 << ns_idx;
                 }
             }
         }
@@ -511,9 +497,9 @@ impl Signature {
                     let bound_idx = total_positional_params + i;
                     // Skip past *args slot if present
                     let ns_idx = total_positional_params + var_args_offset + i;
-                    if !bound_params[bound_idx] {
+                    if (bound_params & (1 << bound_idx)) == 0 {
                         namespace[ns_idx] = defaults[default_idx + slot_idx].clone_with_heap(heap);
-                        bound_params[bound_idx] = true;
+                        bound_params |= 1 << bound_idx;
                     }
                 }
             }
@@ -530,7 +516,7 @@ impl Signature {
         if let Some(ref pos_args) = self.pos_args {
             let required_pos_only = pos_args.len().saturating_sub(self.pos_defaults_count);
             for (i, &param_id) in pos_args.iter().enumerate() {
-                if i < required_pos_only && !bound_params[i] {
+                if i < required_pos_only && (bound_params & (1 << i)) == 0 {
                     missing_positional.push(interns.get_str(param_id));
                 }
             }
@@ -540,7 +526,7 @@ impl Signature {
         if let Some(ref args_params) = self.args {
             let required_args = args_params.len().saturating_sub(self.arg_defaults_count);
             for (i, &param_id) in args_params.iter().enumerate() {
-                if i < required_args && !bound_params[pos_param_count + i] {
+                if i < required_args && (bound_params & (1 << (pos_param_count + i))) == 0 {
                     missing_positional.push(interns.get_str(param_id));
                 }
             }
@@ -561,7 +547,7 @@ impl Signature {
             let default_map = self.kwarg_default_map.as_ref();
             for (i, &param_id) in kwargs_params.iter().enumerate() {
                 let has_default = default_map.and_then(|map| map.get(i)).is_some_and(Option::is_some);
-                if !has_default && !bound_params[total_positional_params + i] {
+                if !has_default && (bound_params & (1 << (total_positional_params + i))) == 0 {
                     missing_kwonly.push(interns.get_str(param_id));
                 }
             }
@@ -589,6 +575,90 @@ impl Signature {
         }
 
         Ok(())
+    }
+
+    /// Returns the total number of named parameters (excluding *args/**kwargs slots).
+    ///
+    /// This is `pos_args.len() + args.len() + kwargs.len()`.
+    pub fn param_count(&self) -> usize {
+        self.pos_arg_count() + self.arg_count() + self.kwarg_count()
+    }
+
+    /// Returns the total number of namespace slots needed for parameters.
+    ///
+    /// This includes slots for:
+    /// - All named parameters (pos_args + args + kwargs)
+    /// - The *args tuple (if var_args is Some)
+    /// - The **kwargs dict (if var_kwargs is Some)
+    pub fn total_slots(&self) -> usize {
+        let mut slots = self.param_count();
+        if self.var_args.is_some() {
+            slots += 1;
+        }
+        if self.var_kwargs.is_some() {
+            slots += 1;
+        }
+        slots
+    }
+
+    /// Returns the total number of default values across all parameter groups.
+    pub fn total_defaults_count(&self) -> usize {
+        self.pos_defaults_count + self.arg_defaults_count + self.kwarg_defaults_count()
+    }
+
+    /// Returns the minimum number of positional arguments required.
+    ///
+    /// This is the total positional param count minus the number of defaults.
+    /// For a signature like `def f(a, b, c=1)`, this returns 2 (a and b are required).
+    #[inline]
+    fn required_positional_count(&self) -> usize {
+        self.pos_arg_count() + self.arg_count() - self.pos_defaults_count - self.arg_defaults_count
+    }
+
+    fn kwarg_defaults_count(&self) -> usize {
+        self.kwarg_default_map
+            .as_deref()
+            .map(|v| v.iter().filter(|&x| x.is_some()).count())
+            .unwrap_or_default()
+    }
+
+    /// Returns the number of positional-only parameters.
+    fn pos_arg_count(&self) -> usize {
+        self.pos_args.as_ref().map_or(0, Vec::len)
+    }
+
+    /// Returns the number of positional-or-keyword parameters.
+    fn arg_count(&self) -> usize {
+        self.args.as_ref().map_or(0, Vec::len)
+    }
+
+    /// Returns the number of keyword-only parameters.
+    fn kwarg_count(&self) -> usize {
+        self.kwargs.as_ref().map_or(0, Vec::len)
+    }
+
+    /// Returns an iterator over all parameter names in namespace slot order.
+    ///
+    /// Order: pos_args, args, var_args (if present), kwargs, var_kwargs (if present)
+    fn param_names(&self) -> impl Iterator<Item = StringId> + '_ {
+        let pos_args = self.pos_args.iter().flat_map(|v| v.iter().copied());
+        let args = self.args.iter().flat_map(|v| v.iter().copied());
+        let var_args = self.var_args.iter().copied();
+        let kwargs = self.kwargs.iter().flat_map(|v| v.iter().copied());
+        let var_kwargs = self.var_kwargs.iter().copied();
+
+        pos_args.chain(args).chain(var_args).chain(kwargs).chain(var_kwargs)
+    }
+
+    /// Returns the maximum number of positional arguments accepted.
+    ///
+    /// Returns None if *args is present (unlimited positional args).
+    fn max_positional_count(&self) -> Option<usize> {
+        if self.var_args.is_some() {
+            None
+        } else {
+            Some(self.pos_arg_count() + self.arg_count())
+        }
     }
 
     /// Creates an error for wrong number of arguments.
