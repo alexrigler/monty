@@ -17,8 +17,12 @@ install-py: .uv ## Install python dependencies
 	# --only-dev to avoid building the python package, use make dev-py for that
 	uv sync --all-packages --only-dev
 
+.PHONY: install-js
+install-js: ## Install JS package dependencies
+	cd crates/monty-js && npm install
+
 .PHONY: install
-install: .cargo .pre-commit install-py ## Install the package, dependencies, and pre-commit for local development
+install: .cargo .pre-commit install-py install-js ## Install the package, dependencies, and pre-commit for local development
 	cargo check --workspace
 	pre-commit install --install-hooks
 
@@ -26,9 +30,25 @@ install: .cargo .pre-commit install-py ## Install the package, dependencies, and
 dev-py: ## Install the python package for development
 	uv run maturin develop --uv -m crates/monty-python/Cargo.toml
 
+.PHONY: dev-js
+dev-js: ## Build the JS package (debug)
+	cd crates/monty-js && npm run build:debug
+
+.PHONY: lint-js
+lint-js: install-js ## Lint JS code with oxlint
+	cd crates/monty-js && npm run lint
+
+.PHONY: test-js
+test-js: dev-js ## Build and test the JS package
+	cd crates/monty-js && npm test
+
 .PHONY: dev-py-release
 dev-py-release: ## Install the python package for development with a release build
 	uv run maturin develop --uv -m crates/monty-python/Cargo.toml --release
+
+.PHONY: dev-js-release
+dev-js-release: ## Build the JS package (release)
+	cd crates/monty-js && npm run build
 
 .PHONY: dev-py-pgo
 dev-py-pgo: ## Install the python package for development with profile-guided optimization
@@ -50,8 +70,12 @@ format-py: ## Format Python code - WARNING be careful about this command as it m
 	uv run ruff format
 	uv run ruff check --fix --fix-only
 
+.PHONY: format-js
+format-js: install-js ## Format JS code with prettier
+	cd crates/monty-js && npm run format:prettier
+
 .PHONY: format
-format: format-rs format-py ## Format Rust code, this does not format Python code as we have to be careful with that
+format: format-rs format-py format-js ## Format Rust code, this does not format Python code as we have to be careful with that
 
 .PHONY: lint-rs
 lint-rs:  ## Lint Rust code with clippy and import checks
