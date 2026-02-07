@@ -68,6 +68,7 @@
 use std::fmt::Write;
 
 use ahash::AHashSet;
+use smallvec::smallvec;
 
 use super::{MontyIter, PyTrait, Type, str::Str};
 use crate::{
@@ -1942,9 +1943,10 @@ fn bytes_partition(
     let sep_val = allocate_bytes(sep_found.to_vec(), heap)?;
     let after_val = allocate_bytes(after.to_vec(), heap)?;
 
-    let tuple = crate::types::Tuple::new(vec![before_val, sep_val, after_val]);
-    let heap_id = heap.allocate(HeapData::Tuple(tuple))?;
-    Ok(Value::Ref(heap_id))
+    Ok(crate::types::allocate_tuple(
+        smallvec![before_val, sep_val, after_val],
+        heap,
+    )?)
 }
 
 /// Implements Python's `bytes.rpartition(sep)` method.
@@ -1973,9 +1975,10 @@ fn bytes_rpartition(
     let sep_val = allocate_bytes(sep_found.to_vec(), heap)?;
     let after_val = allocate_bytes(after.to_vec(), heap)?;
 
-    let tuple = crate::types::Tuple::new(vec![before_val, sep_val, after_val]);
-    let heap_id = heap.allocate(HeapData::Tuple(tuple))?;
-    Ok(Value::Ref(heap_id))
+    Ok(crate::types::allocate_tuple(
+        smallvec![before_val, sep_val, after_val],
+        heap,
+    )?)
 }
 
 // =============================================================================

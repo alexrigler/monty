@@ -4,6 +4,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use smallvec::smallvec;
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
     parse::CodeRange,
     resource::ResourceTracker,
     types::{
-        AttrCallResult, PyTrait, Str, Tuple, Type,
+        AttrCallResult, PyTrait, Str, Type, allocate_tuple,
         str::{StringRepr, string_repr_fmt},
     },
     value::Value,
@@ -1205,12 +1206,11 @@ impl SimpleException {
             // Construct tuple with 0 or 1 elements based on whether arg exists
             let elements = if let Some(arg_str) = &self.arg {
                 let str_id = heap.allocate(HeapData::Str(Str::from(arg_str.clone())))?;
-                vec![Value::Ref(str_id)]
+                smallvec![Value::Ref(str_id)]
             } else {
-                vec![]
+                smallvec![]
             };
-            let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(elements)))?;
-            Ok(Some(AttrCallResult::Value(Value::Ref(tuple_id))))
+            Ok(Some(AttrCallResult::Value(allocate_tuple(elements, heap)?)))
         } else {
             Ok(None)
         }

@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, fmt::Write};
 
 use ahash::AHashSet;
+use smallvec::SmallVec;
 
 use super::{MontyIter, PyTrait};
 use crate::{
@@ -591,7 +592,7 @@ fn list_extend(
     let mut iter = MontyIter::new(iterable, heap, interns)?;
 
     // Collect all items from the iterator
-    let items = iter.collect(heap, interns)?;
+    let items: SmallVec<[_; 2]> = iter.collect(heap, interns)?;
     iter.drop_with_heap(heap);
 
     // Add each item to the list

@@ -6,6 +6,7 @@ use std::fmt::Write;
 use std::{borrow::Cow, fmt};
 
 use ahash::AHashSet;
+use smallvec::smallvec;
 
 use super::{Bytes, MontyIter, PyTrait};
 use crate::{
@@ -1806,9 +1807,10 @@ fn str_partition(
     let sep_val = allocate_string(sep_found.to_owned(), heap)?;
     let after_val = allocate_string(after.to_owned(), heap)?;
 
-    let tuple = crate::types::Tuple::new(vec![before_val, sep_val, after_val]);
-    let heap_id = heap.allocate(HeapData::Tuple(tuple))?;
-    Ok(Value::Ref(heap_id))
+    Ok(crate::types::allocate_tuple(
+        smallvec![before_val, sep_val, after_val],
+        heap,
+    )?)
 }
 
 /// Implements Python's `str.rpartition(sep)` method.
@@ -1838,9 +1840,10 @@ fn str_rpartition(
     let sep_val = allocate_string(sep_found.to_owned(), heap)?;
     let after_val = allocate_string(after.to_owned(), heap)?;
 
-    let tuple = crate::types::Tuple::new(vec![before_val, sep_val, after_val]);
-    let heap_id = heap.allocate(HeapData::Tuple(tuple))?;
-    Ok(Value::Ref(heap_id))
+    Ok(crate::types::allocate_tuple(
+        smallvec![before_val, sep_val, after_val],
+        heap,
+    )?)
 }
 
 // =============================================================================

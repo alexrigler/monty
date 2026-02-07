@@ -7,6 +7,7 @@
 use std::fmt::Write;
 
 use ahash::AHashSet;
+use smallvec::SmallVec;
 
 use crate::{
     args::{ArgValues, KwargsValues},
@@ -15,7 +16,7 @@ use crate::{
     intern::{Interns, StaticStrings, StringId},
     os::OsFunction,
     resource::ResourceTracker,
-    types::{AttrCallResult, PyTrait, Str, Type},
+    types::{AttrCallResult, PyTrait, Str, Type, allocate_tuple},
     value::{EitherStr, Value},
 };
 
@@ -583,15 +584,13 @@ impl PyTrait for Path {
                 Value::Ref(heap.allocate(HeapData::List(List::new(items)))?)
             }
             Some(StaticStrings::Parts) => {
-                use crate::types::Tuple;
-
                 let parts = self.parts();
-                let mut items = Vec::with_capacity(parts.len());
+                let mut items = SmallVec::with_capacity(parts.len());
                 for part in parts {
                     let str_id = heap.allocate(HeapData::Str(Str::new(part.to_owned())))?;
                     items.push(Value::Ref(str_id));
                 }
-                Value::Ref(heap.allocate(HeapData::Tuple(Tuple::new(items)))?)
+                allocate_tuple(items, heap)?
             }
             // Method is_absolute() returns bool - handled as property since it takes no args
             // NOTE: For method calls, we'd need to return a bound method. For now, properties only.
