@@ -16,13 +16,12 @@ use crate::{
     exception_private::{ExcType, RunError, SimpleException},
     heap::{HeapData, HeapGuard, HeapId},
     intern::FunctionId,
-    io::PrintWriter,
     resource::ResourceTracker,
     types::{List, PyTrait},
     value::Value,
 };
 
-impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {
+impl<T: ResourceTracker> VM<'_, '_, T> {
     /// Gets or creates the scheduler for async operations.
     ///
     /// The scheduler is created lazily on first use to avoid allocations for
