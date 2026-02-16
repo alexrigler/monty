@@ -175,7 +175,7 @@ impl PyTrait for Tuple {
                 .indices(self.items.len())
                 .map_err(|()| ExcType::value_error_slice_step_zero())?;
 
-            let items = get_slice_items(&self.items, start, stop, step, heap);
+            let items = get_slice_items(&self.items, start, stop, step, heap)?;
             return Ok(allocate_tuple(items.into(), heap)?);
         }
 
@@ -210,6 +210,7 @@ impl PyTrait for Tuple {
         guard.increase_err()?;
 
         for (i1, i2) in self.items.iter().zip(&other.items) {
+            heap.check_time()?;
             if !i1.py_eq(i2, heap, guard, interns)? {
                 guard.decrease();
                 return Ok(false);

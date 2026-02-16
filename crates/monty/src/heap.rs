@@ -977,6 +977,20 @@ impl<T: ResourceTracker> Heap<T> {
         &mut self.tracker
     }
 
+    /// Checks whether the configured time limit has been exceeded.
+    ///
+    /// Delegates to the resource tracker's `check_time()`. For `NoLimitTracker`,
+    /// this is inlined as a no-op with zero runtime cost. For `LimitTracker`,
+    /// it compares elapsed time against the configured `max_duration_secs`.
+    ///
+    /// Call this inside Rust-side loops (builtins, sort, iterator collection)
+    /// that execute within a single bytecode instruction and would otherwise
+    /// bypass the VM's per-instruction timeout check.
+    #[inline]
+    pub fn check_time(&self) -> Result<(), ResourceError> {
+        self.tracker.check_time()
+    }
+
     /// Number of entries in the heap
     pub fn size(&self) -> usize {
         self.entries.len()
@@ -1503,6 +1517,7 @@ impl<T: ResourceTracker> Heap<T> {
                         .ok_or_else(ExcType::overflow_repeat_count)?;
                     let mut result = Vec::with_capacity(capacity);
                     for _ in 0..count {
+                        self.check_time()?;
                         for item in &items {
                             result.push(item.copy_for_extend());
                         }
@@ -1550,6 +1565,7 @@ impl<T: ResourceTracker> Heap<T> {
                         .ok_or_else(ExcType::overflow_repeat_count)?;
                     let mut result = SmallVec::with_capacity(capacity);
                     for _ in 0..count {
+                        self.check_time()?;
                         for item in &items {
                             result.push(item.copy_for_extend());
                         }
