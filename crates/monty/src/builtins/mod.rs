@@ -15,6 +15,7 @@ mod hex;
 mod id;
 mod isinstance;
 mod len;
+mod map;
 mod min_max; // min and max share implementation
 mod next;
 mod oct;
@@ -184,7 +185,7 @@ pub enum BuiltinsFunctions {
     Len,
     // list - handled by Type enum
     // Locals,
-    // Map,
+    Map,
     Max,
     // memoryview - handled by Type enum
     Min,
@@ -240,6 +241,7 @@ impl BuiltinsFunctions {
             Self::Id => id::builtin_id(heap, args),
             Self::Isinstance => isinstance::builtin_isinstance(heap, args),
             Self::Len => len::builtin_len(heap, args, interns),
+            Self::Map => map::builtin_map(heap, args, interns, print_writer),
             Self::Max => min_max::builtin_max(heap, args, interns),
             Self::Min => min_max::builtin_min(heap, args, interns),
             Self::Next => next::builtin_next(heap, args, interns),
