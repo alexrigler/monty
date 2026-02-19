@@ -37,6 +37,7 @@ fn sync_package_json_version() {
             if line == expected {
                 return;
             }
+            result.push_str(&expected);
             changed = true;
         } else {
             result.push_str(line);
